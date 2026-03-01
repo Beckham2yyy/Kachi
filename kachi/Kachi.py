@@ -19,9 +19,8 @@ CMC_LISTINGS = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/lat
 BINANCE_MIN_VOLUME = 5_000_000
 CMC_MIN_MARKETCAP = 10_000_000
 CMC_MIN_VOLUME = 1_000_000
-CMC_MAX_RANK = 1500
 
-CHECK_INTERVAL = 300  # 5 minutes
+CHECK_INTERVAL = 60  # 1 minute
 
 # =========================
 # DATABASE
@@ -32,13 +31,15 @@ cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS binance_listings (
-    symbol TEXT PRIMARY KEY
+    symbol TEXT PRIMARY KEY,
+    alerted INTEGER DEFAULT 0
 )
 """)
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS cmc_listings (
-    id INTEGER PRIMARY KEY
+    id INTEGER PRIMARY KEY,
+    alerted INTEGER DEFAULT 0
 )
 """)
 
@@ -75,7 +76,6 @@ async def scan_binance(first_run=False):
                 if resp.status != 200:
                     print("Binance API error:", resp.status)
                     return
-
                 data = await resp.json()
 
         for symbol_data in data.get("symbols", []):
@@ -87,39 +87,67 @@ async def scan_binance(first_run=False):
             if any(x in symbol for x in ["UP", "DOWN", "BULL", "BEAR"]):
                 continue
 
-            cursor.execute("SELECT symbol FROM binance_listings WHERE symbol=?", (symbol,))
-            exists = cursor.fetchone()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{BINANCE_TICKER}?symbol={symbol}") as vol_resp:
+                    if vol_resp.status != 200:
+                        continue
+                    vol_data = await vol_resp.json()
 
-            if not exists:
-                cursor.execute("INSERT INTO binance_listings VALUES (?)", (symbol,))
+            volume = float(vol_data.get("quoteVolume", 0))
+            meets_threshold = volume >= BINANCE_MIN_VOLUME
+
+            cursor.execute("SELECT alerted FROM binance_listings WHERE symbol=?", (symbol,))
+            row = cursor.fetchone()
+
+            if not row:
+                alerted_value = 1 if (meets_threshold and not first_run) else 0
+                cursor.execute(
+                    "INSERT INTO binance_listings (symbol, alerted) VALUES (?, ?)",
+                    (symbol, alerted_value)
+                )
                 conn.commit()
 
-                if first_run:
-                    continue
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{BINANCE_TICKER}?symbol={symbol}") as vol_resp:
-                        if vol_resp.status != 200:
-                            print("Volume fetch error:", vol_resp.status)
-                            continue
-
-                        vol_data = await vol_resp.json()
-
-                volume = float(vol_data.get("quoteVolume", 0))
-
-                if volume >= BINANCE_MIN_VOLUME:
-                    print("New Binance listing detected:", symbol)
-
+                if meets_threshold and not first_run:
                     message = (
-                        f"New Binance Listing\n\n"
-                        f"Symbol: {symbol}\n"
-                        f"24h Volume: ${volume:,.0f}\n"
-                        f"Detected: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}"
+                        f"🚨 BINANCE POTENTIAL 10X\n\n"
+                        f"🪙 Pair: {symbol}\n"
+                        f"💰 24H Volume: ${volume:,.0f}\n"
+                        f"📊 Threshold: ${BINANCE_MIN_VOLUME:,.0f}\n"
+                        f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC\n\n"
+                        f"Volume just crossed your trigger level."
                     )
-
                     await send_telegram(message)
 
-    except Exception as e:
+            else:
+                alerted = row[0]
+
+                # Fresh breakout
+                if meets_threshold and alerted == 0:
+                    cursor.execute(
+                        "UPDATE binance_listings SET alerted=1 WHERE symbol=?",
+                        (symbol,)
+                    )
+                    conn.commit()
+
+                    message = (
+                        f"🚨 BINANCE POTENTIAL 10X\n\n"
+                        f"🪙 Pair: {symbol}\n"
+                        f"💰 24H Volume: ${volume:,.0f}\n"
+                        f"📊 Threshold: ${BINANCE_MIN_VOLUME:,.0f}\n"
+                        f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC\n\n"
+                        f"Volume just crossed your trigger level."
+                    )
+                    await send_telegram(message)
+
+                # Reset when drops below
+                elif not meets_threshold and alerted == 1:
+                    cursor.execute(
+                        "UPDATE binance_listings SET alerted=0 WHERE symbol=?",
+                        (symbol,)
+                    )
+                    conn.commit()
+
+    except Exception:
         print("Binance scan error:")
         traceback.print_exc()
 
@@ -148,46 +176,70 @@ async def scan_cmc(first_run=False):
                 if resp.status != 200:
                     print("CMC API error:", resp.status)
                     return
-
                 data = await resp.json()
 
         for coin in data.get("data", []):
             coin_id = coin["id"]
+            marketcap = coin["quote"]["USD"].get("market_cap", 0)
+            volume = coin["quote"]["USD"].get("volume_24h", 0)
 
-            cursor.execute("SELECT id FROM cmc_listings WHERE id=?", (coin_id,))
-            exists = cursor.fetchone()
+            meets_threshold = (
+                marketcap and marketcap >= CMC_MIN_MARKETCAP and
+                volume and volume >= CMC_MIN_VOLUME
+            )
 
-            if not exists:
-                cursor.execute("INSERT INTO cmc_listings VALUES (?)", (coin_id,))
+            cursor.execute("SELECT alerted FROM cmc_listings WHERE id=?", (coin_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                alerted_value = 1 if (meets_threshold and not first_run) else 0
+                cursor.execute(
+                    "INSERT INTO cmc_listings (id, alerted) VALUES (?, ?)",
+                    (coin_id, alerted_value)
+                )
                 conn.commit()
 
-                if first_run:
-                    continue
-
-                marketcap = coin["quote"]["USD"].get("market_cap", 0)
-                volume = coin["quote"]["USD"].get("volume_24h", 0)
-                rank = coin.get("cmc_rank")
-
-                if (
-                    marketcap and marketcap >= CMC_MIN_MARKETCAP and
-                    volume and volume >= CMC_MIN_VOLUME and
-                    rank and rank <= CMC_MAX_RANK
-                ):
-                    print("New CMC listing detected:", coin["symbol"])
-
+                if meets_threshold and not first_run:
                     message = (
-                        f"New CMC Listing\n\n"
-                        f"Name: {coin['name']}\n"
-                        f"Symbol: {coin['symbol']}\n"
-                        f"Rank: {rank}\n"
-                        f"Market Cap: ${marketcap:,.0f}\n"
-                        f"24h Volume: ${volume:,.0f}\n"
-                        f"Detected: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())}"
+                        f"🚨 CMC POTENTIAL 10X\n\n"
+                        f"🪙 Name/Symbol: {coin['name']} / {coin['symbol']}\n"
+                        f"💰 24H Volume: ${volume:,.0f}\n"
+                        f"📊 Market Cap Threshold: ${CMC_MIN_MARKETCAP:,.0f}\n"
+                        f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC\n\n"
+                        f"Coin just crossed your threshold."
                     )
-
                     await send_telegram(message)
 
-    except Exception as e:
+            else:
+                alerted = row[0]
+
+                # Fresh breakout
+                if meets_threshold and alerted == 0:
+                    cursor.execute(
+                        "UPDATE cmc_listings SET alerted=1 WHERE id=?",
+                        (coin_id,)
+                    )
+                    conn.commit()
+
+                    message = (
+                        f"🚨 CMC POTENTIAL 10X\n\n"
+                        f"🪙 Name/Symbol: {coin['name']} / {coin['symbol']}\n"
+                        f"💰 24H Volume: ${volume:,.0f}\n"
+                        f"📊 Market Cap Threshold: ${CMC_MIN_MARKETCAP:,.0f}\n"
+                        f"⏰ Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC\n\n"
+                        f"Coin just crossed your threshold."
+                    )
+                    await send_telegram(message)
+
+                # Reset when drops below
+                elif not meets_threshold and alerted == 1:
+                    cursor.execute(
+                        "UPDATE cmc_listings SET alerted=0 WHERE id=?",
+                        (coin_id,)
+                    )
+                    conn.commit()
+
+    except Exception:
         print("CMC scan error:")
         traceback.print_exc()
 
@@ -209,7 +261,7 @@ async def main():
     while True:
         await scan_binance()
         await scan_cmc()
-        print("Sleeping...\n")
+        print("Sleeping 60 seconds...\n")
         await asyncio.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
