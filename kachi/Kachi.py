@@ -10,7 +10,7 @@ import traceback
 
 CMC_API_KEY = "6881c6f6d56b4cf58727255319ec235e"
 TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
-TELEGRAM_CHAT_ID = "7198809557"
+TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]  # Added new chat ID
 
 BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
@@ -61,15 +61,16 @@ conn.commit()
 
 async def send_telegram(message):
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message
-        }
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    print("Telegram error:", resp.status)
+            for chat_id in TELEGRAM_CHAT_IDS:  # send to all chat IDs
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message
+                }
+                async with session.post(url, json=payload) as resp:
+                    if resp.status != 200:
+                        print(f"Telegram error for {chat_id}:", resp.status)
     except Exception as e:
         print("Telegram send failed:", e)
 
@@ -90,7 +91,7 @@ async def scan_binance(first_run=False):
 
             async with session.get(BINANCE_TICKER) as ticker_resp:
                 if ticker_resp.status != 200:
-                    print("Binance Ticker API error:", ticker_resp.status)
+                    print("Binance Ticker API error:", resp.status)
                     return
                 ticker_data = await ticker_resp.json()
 
