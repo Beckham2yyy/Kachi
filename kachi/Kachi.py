@@ -10,7 +10,7 @@ import traceback
 
 CMC_API_KEY = "6881c6f6d56b4cf58727255319ec235e"
 TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
-TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]  # Added new chat ID
+TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
 BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
 BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
@@ -23,8 +23,8 @@ CMC_MIN_VOLUME = 1_000_000
 PRICE_SPIKE_PERCENT = 5
 VOLUME_SPIKE_PERCENT = 20
 
-CHECK_INTERVAL = 60  # 1 minute
-COOLDOWN = 60 * 60  # 1 hour cooldown in seconds
+CHECK_INTERVAL = 60
+COOLDOWN = 60 * 60
 
 # =========================
 # DATABASE
@@ -62,7 +62,7 @@ conn.commit()
 async def send_telegram(message):
     try:
         async with aiohttp.ClientSession() as session:
-            for chat_id in TELEGRAM_CHAT_IDS:  # send to all chat IDs
+            for chat_id in TELEGRAM_CHAT_IDS:
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {
                     "chat_id": chat_id,
@@ -134,15 +134,12 @@ async def scan_binance(first_run=False):
 
             alerted, baseline_volume, baseline_price, last_alert = row
 
-            # Skip alert if still in cooldown
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
 
-            # Instant spike checks
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
             instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
 
-            # Cumulative growth checks
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
             cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
@@ -150,6 +147,9 @@ async def scan_binance(first_run=False):
             pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
 
             if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+
                 cursor.execute(
                     "UPDATE binance_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
                     (volume, current_price, now, symbol)
@@ -162,10 +162,11 @@ async def scan_binance(first_run=False):
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider Long\n\n"
+                    f"Entry Signal: Consider {signal}\n\n"
                     f"========================\n"
                     f"powered by @ZeusisHIM"
                 )
+
                 await send_telegram(message)
 
             elif not pump_condition and alerted == 1:
@@ -203,6 +204,7 @@ async def scan_cmc(first_run=False):
             current_price = coin["quote"]["USD"].get("price", 0)
             price_change = coin["quote"]["USD"].get("percent_change_1h", 0)
             marketcap = coin["quote"]["USD"].get("market_cap", 0)
+            slug = coin.get("slug")
 
             meets_threshold = marketcap >= CMC_MIN_MARKETCAP and volume >= CMC_MIN_VOLUME
 
@@ -237,11 +239,16 @@ async def scan_cmc(first_run=False):
             pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
 
             if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+
                 cursor.execute(
                     "UPDATE cmc_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE id=?",
                     (volume, current_price, now, coin_id)
                 )
                 conn.commit()
+
+                chart_link = f"https://coinmarketcap.com/currencies/{slug}/"
 
                 message = (
                     f"🚨 CMC PUMP ALERT\n\n"
@@ -249,10 +256,12 @@ async def scan_cmc(first_run=False):
                     f"Price Change: {cumulative_price_growth:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider Long\n\n"
+                    f"Entry Signal: Consider {signal}\n\n"
+                    f"Chart:\n{chart_link}\n\n"
                     f"========================\n"
                     f"powered by @ZeusisHIM"
                 )
+
                 await send_telegram(message)
 
             elif not pump_condition and alerted == 1:
