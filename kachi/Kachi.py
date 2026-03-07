@@ -12,11 +12,8 @@ CMC_API_KEY = "6881c6f6d56b4cf58727255319ec235e"
 TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
 TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
-BINANCE_EXCHANGE_INFO = "https://api.binance.com/api/v3/exchangeInfo"
-BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
 CMC_LISTINGS = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
-BINANCE_MIN_VOLUME = 5_000_000
 CMC_MIN_MARKETCAP = 10_000_000
 CMC_MIN_VOLUME = 1_000_000
 
@@ -32,16 +29,6 @@ COOLDOWN = 60 * 60
 
 conn = sqlite3.connect("listings.db")
 cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS binance_listings (
-symbol TEXT PRIMARY KEY,
-alerted INTEGER DEFAULT 0,
-baseline_volume REAL DEFAULT 0,
-baseline_price REAL DEFAULT 0,
-last_alert INTEGER DEFAULT 0
-)
-""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS cmc_listings (
@@ -75,112 +62,6 @@ async def send_telegram(message):
         print("Telegram send failed:", e)
 
 # =========================
-# BINANCE SCANNER
-# =========================
-
-async def scan_binance(first_run=False):
-    print("Scanning Binance...")
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(BINANCE_EXCHANGE_INFO) as resp:
-                if resp.status != 200:
-                    print("Binance API error:", resp.status)
-                    return
-                exchange_data = await resp.json()
-
-            async with session.get(BINANCE_TICKER) as ticker_resp:
-                if ticker_resp.status != 200:
-                    print("Binance Ticker API error:", resp.status)
-                    return
-                ticker_data = await ticker_resp.json()
-
-        ticker_map = {item["symbol"]: item for item in ticker_data}
-
-        for symbol_data in exchange_data.get("symbols", []):
-            symbol = symbol_data["symbol"]
-
-            if not symbol.endswith("USDT"):
-                continue
-
-            if any(x in symbol for x in ["UP", "DOWN", "BULL", "BEAR"]):
-                continue
-
-            if symbol not in ticker_map:
-                continue
-
-            vol_data = ticker_map[symbol]
-            volume = float(vol_data.get("quoteVolume", 0))
-            current_price = float(vol_data.get("lastPrice", 0))
-            price_change = float(vol_data.get("priceChangePercent", 0))
-
-            meets_threshold = volume >= BINANCE_MIN_VOLUME
-
-            cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM binance_listings WHERE symbol=?",
-                (symbol,)
-            )
-            row = cursor.fetchone()
-
-            now = int(time.time())
-
-            if not row:
-                cursor.execute(
-                    "INSERT INTO binance_listings (symbol, alerted, baseline_volume, baseline_price, last_alert) VALUES (?, ?, ?, ?, ?)",
-                    (symbol, 0, volume, current_price, 0)
-                )
-                conn.commit()
-                continue
-
-            alerted, baseline_volume, baseline_price, last_alert = row
-
-            if last_alert and (now - last_alert) < COOLDOWN:
-                continue
-
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
-
-            cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
-            cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
-
-            pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
-
-            if pump_condition and alerted == 0:
-
-                signal = "Long" if cumulative_price_growth >= 0 else "Short"
-
-                cursor.execute(
-                    "UPDATE binance_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
-                    (volume, current_price, now, symbol)
-                )
-                conn.commit()
-
-                message = (
-                    f"🚨 BINANCE PUMP ALERT\n\n"
-                    f"Pair: {symbol}\n"
-                    f"Price Change: {price_change:+.2f}%\n"
-                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
-                    f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider {signal}\n\n"
-                    f"========================\n"
-                    f"powered by @ZeusisHIM"
-                )
-
-                await send_telegram(message)
-
-            elif not pump_condition and alerted == 1:
-                cursor.execute(
-                    "UPDATE binance_listings SET alerted=0 WHERE symbol=?",
-                    (symbol,)
-                )
-                conn.commit()
-
-    except Exception:
-        print("Binance scan error:")
-        traceback.print_exc()
-
-# =========================
 # CMC SCANNER
 # =========================
 
@@ -188,7 +69,7 @@ async def scan_cmc(first_run=False):
     print("Scanning CMC...")
 
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": "1", "limit": "200", "sort": "date_added", "sort_dir": "desc", "convert": "USD"}
+    params = {"start": "1", "limit": "400", "sort": "date_added", "sort_dir": "desc", "convert": "USD"}
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -285,13 +166,11 @@ async def main():
     await send_telegram("Sniping 🍁")
 
     print("Initializing database silently...")
-    await scan_binance(first_run=True)
     await scan_cmc(first_run=True)
 
     print("Bot running...")
 
     while True:
-        await scan_binance()
         await scan_cmc()
         print("Sleeping 60 seconds...\n")
         await asyncio.sleep(CHECK_INTERVAL)
