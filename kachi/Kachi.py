@@ -12,8 +12,10 @@ CMC_API_KEY = "6881c6f6d56b4cf58727255319ec235e"
 TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
 TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
+GATEIO_TICKERS = "https://api.gateio.ws/api/v4/spot/tickers"
 CMC_LISTINGS = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
+GATEIO_MIN_VOLUME = 5_000_000
 CMC_MIN_MARKETCAP = 10_000_000
 CMC_MIN_VOLUME = 1_000_000
 
@@ -29,6 +31,16 @@ COOLDOWN = 60 * 60
 
 conn = sqlite3.connect("listings.db")
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS gateio_listings (
+symbol TEXT PRIMARY KEY,
+alerted INTEGER DEFAULT 0,
+baseline_volume REAL DEFAULT 0,
+baseline_price REAL DEFAULT 0,
+last_alert INTEGER DEFAULT 0
+)
+""")
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS cmc_listings (
@@ -62,6 +74,97 @@ async def send_telegram(message):
         print("Telegram send failed:", e)
 
 # =========================
+# GATE.IO SCANNER
+# =========================
+
+async def scan_gateio(first_run=False):
+    print("Scanning Gate.io...")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(GATEIO_TICKERS) as resp:
+                if resp.status != 200:
+                    print("Gate.io API error:", resp.status)
+                    return
+                ticker_data = await resp.json()
+
+        for item in ticker_data:
+            symbol = item["currency_pair"]
+
+            if not symbol.endswith("_USDT"):
+                continue
+
+            volume = float(item.get("quote_volume", 0))
+            current_price = float(item.get("last", 0))
+            price_change = float(item.get("change_percentage", 0))
+
+            meets_threshold = volume >= GATEIO_MIN_VOLUME
+
+            cursor.execute(
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM gateio_listings WHERE symbol=?",
+                (symbol,)
+            )
+            row = cursor.fetchone()
+
+            now = int(time.time())
+
+            if not row:
+                cursor.execute(
+                    "INSERT INTO gateio_listings (symbol, alerted, baseline_volume, baseline_price, last_alert) VALUES (?, ?, ?, ?, ?)",
+                    (symbol, 0, volume, current_price, 0)
+                )
+                conn.commit()
+                continue
+
+            alerted, baseline_volume, baseline_price, last_alert = row
+
+            if last_alert and (now - last_alert) < COOLDOWN:
+                continue
+
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
+            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
+
+            cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
+            cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
+            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
+
+            pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
+
+            if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+
+                cursor.execute(
+                    "UPDATE gateio_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
+                    (volume, current_price, now, symbol)
+                )
+                conn.commit()
+
+                message = (
+                    f"🚨 GATE.IO PUMP ALERT\n\n"
+                    f"Pair: {symbol}\n"
+                    f"Price Change: {price_change:+.2f}%\n"
+                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
+                    f"Volume: ${volume:,.0f}\n"
+                    f"Entry Signal: Consider {signal}\n\n"
+                    f"========================\n"
+                    f"powered by @ZeusisHIM"
+                )
+
+                await send_telegram(message)
+
+            elif not pump_condition and alerted == 1:
+                cursor.execute(
+                    "UPDATE gateio_listings SET alerted=0 WHERE symbol=?",
+                    (symbol,)
+                )
+                conn.commit()
+
+    except Exception:
+        print("Gate.io scan error:")
+        traceback.print_exc()
+
+# =========================
 # CMC SCANNER
 # =========================
 
@@ -69,7 +172,7 @@ async def scan_cmc(first_run=False):
     print("Scanning CMC...")
 
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": "1", "limit": "400", "sort": "date_added", "sort_dir": "desc", "convert": "USD"}
+    params = {"start": "1", "limit": "200", "sort": "date_added", "sort_dir": "desc", "convert": "USD"}
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -166,11 +269,13 @@ async def main():
     await send_telegram("Sniping 🍁")
 
     print("Initializing database silently...")
+    await scan_gateio(first_run=True)
     await scan_cmc(first_run=True)
 
     print("Bot running...")
 
     while True:
+        await scan_gateio()
         await scan_cmc()
         print("Sleeping 60 seconds...\n")
         await asyncio.sleep(CHECK_INTERVAL)
