@@ -184,10 +184,12 @@ async def scan_cmc(first_run=False):
 
         for coin in data.get("data", []):
             coin_id = coin["id"]
-            volume = coin["quote"]["USD"].get("volume_24h", 0)
-            current_price = coin["quote"]["USD"].get("price", 0)
-            price_change = coin["quote"]["USD"].get("percent_change_1h", 0)
-            marketcap = coin["quote"]["USD"].get("market_cap", 0)
+
+            volume = coin["quote"]["USD"].get("volume_24h") or 0
+            current_price = coin["quote"]["USD"].get("price") or 0
+            price_change = coin["quote"]["USD"].get("percent_change_1h") or 0
+            marketcap = coin["quote"]["USD"].get("market_cap") or 0
+
             slug = coin.get("slug")
 
             meets_threshold = marketcap >= CMC_MIN_MARKETCAP and volume >= CMC_MIN_VOLUME
