@@ -13,10 +13,7 @@ TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
 TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
 GATEIO_TICKERS = "https://api.gateio.ws/api/v4/spot/tickers"
-BITGET_TICKERS = "https://api.bitget.com/api/v2/spot/market/tickers"
 CMC_LISTINGS = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-
-METALS_API = "https://api.metals.live/v1/spot"
 
 GATEIO_MIN_VOLUME = 5_000_000
 CMC_MIN_MARKETCAP = 10_000_000
@@ -24,9 +21,6 @@ CMC_MIN_VOLUME = 1_000_000
 
 PRICE_SPIKE_PERCENT = 5
 VOLUME_SPIKE_PERCENT = 20
-
-GOLD_SPIKE_PERCENT = 1
-SILVER_SPIKE_PERCENT = 2
 
 CHECK_INTERVAL = 60
 COOLDOWN = 60 * 60
@@ -49,29 +43,10 @@ last_alert INTEGER DEFAULT 0
 """)
 
 cursor.execute("""
-CREATE TABLE IF NOT EXISTS bitget_listings (
-symbol TEXT PRIMARY KEY,
-alerted INTEGER DEFAULT 0,
-baseline_volume REAL DEFAULT 0,
-baseline_price REAL DEFAULT 0,
-last_alert INTEGER DEFAULT 0
-)
-""")
-
-cursor.execute("""
 CREATE TABLE IF NOT EXISTS cmc_listings (
 id INTEGER PRIMARY KEY,
 alerted INTEGER DEFAULT 0,
 baseline_volume REAL DEFAULT 0,
-baseline_price REAL DEFAULT 0,
-last_alert INTEGER DEFAULT 0
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS metals_prices (
-symbol TEXT PRIMARY KEY,
-alerted INTEGER DEFAULT 0,
 baseline_price REAL DEFAULT 0,
 last_alert INTEGER DEFAULT 0
 )
@@ -88,49 +63,45 @@ async def send_telegram(message):
         async with aiohttp.ClientSession() as session:
             for chat_id in TELEGRAM_CHAT_IDS:
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {"chat_id": chat_id, "text": message}
-
+                payload = {
+                    "chat_id": chat_id,
+                    "text": message
+                }
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         print(f"Telegram error for {chat_id}:", resp.status)
-
     except Exception as e:
         print("Telegram send failed:", e)
 
 # =========================
-# METALS SCANNER
+# GATE.IO SCANNER
 # =========================
 
-async def scan_metals(first_run=False):
-    print("Scanning metals...")
+async def scan_gateio(first_run=False):
+    print("Scanning Gate.io...")
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(METALS_API) as resp:
+            async with session.get(GATEIO_TICKERS) as resp:
                 if resp.status != 200:
-                    print("Metals API error:", resp.status)
+                    print("Gate.io API error:", resp.status)
                     return
+                ticker_data = await resp.json()
 
-                data = await resp.json()
+        for item in ticker_data:
+            symbol = item["currency_pair"]
 
-        prices = {}
-        for item in data:
-            prices.update(item)
-
-        metals = {
-            "GOLD": prices.get("gold"),
-            "SILVER": prices.get("silver")
-        }
-
-        for symbol, price in metals.items():
-
-            if price is None:
+            if not symbol.endswith("_USDT"):
                 continue
 
-            spike_threshold = GOLD_SPIKE_PERCENT if symbol == "GOLD" else SILVER_SPIKE_PERCENT
+            volume = float(item.get("quote_volume", 0))
+            current_price = float(item.get("last", 0))
+            price_change = float(item.get("change_percentage", 0))
+
+            meets_threshold = volume >= GATEIO_MIN_VOLUME
 
             cursor.execute(
-                "SELECT alerted, baseline_price, last_alert FROM metals_prices WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM gateio_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -139,56 +110,156 @@ async def scan_metals(first_run=False):
 
             if not row:
                 cursor.execute(
-                    "INSERT INTO metals_prices (symbol, alerted, baseline_price, last_alert) VALUES (?, ?, ?, ?)",
-                    (symbol, 0, price, 0)
+                    "INSERT INTO gateio_listings (symbol, alerted, baseline_volume, baseline_price, last_alert) VALUES (?, ?, ?, ?, ?)",
+                    (symbol, 0, volume, current_price, 0)
                 )
                 conn.commit()
                 continue
 
-            alerted, baseline_price, last_alert = row
+            alerted, baseline_volume, baseline_price, last_alert = row
 
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
 
-            price_growth = ((price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
+            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
 
-            if price_growth >= spike_threshold and alerted == 0:
+            cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
+            cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
+            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
+
+            pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
+
+            if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
 
                 cursor.execute(
-                    "UPDATE metals_prices SET alerted=1, baseline_price=?, last_alert=? WHERE symbol=?",
-                    (price, now, symbol)
+                    "UPDATE gateio_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
+                    (volume, current_price, now, symbol)
                 )
                 conn.commit()
 
                 message = (
-                    f"🚨 {symbol} ALERT\n\n"
-                    f"Price: ${price:,.2f}\n"
-                    f"Price Change: {price_growth:+.2f}%\n\n"
-                    f"Entry Signal: Consider Long\n\n"
+                    f"🚨 GATE.IO PUMP ALERT\n\n"
+                    f"Pair: {symbol}\n"
+                    f"Price Change: {price_change:+.2f}%\n"
+                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
+                    f"Volume: ${volume:,.0f}\n"
+                    f"Entry Signal: Consider {signal}\n\n"
                     f"========================\n"
                     f"powered by @ZeusisHIM"
                 )
 
                 await send_telegram(message)
 
-            elif price_growth < spike_threshold and alerted == 1:
+            elif not pump_condition and alerted == 1:
                 cursor.execute(
-                    "UPDATE metals_prices SET alerted=0 WHERE symbol=?",
+                    "UPDATE gateio_listings SET alerted=0 WHERE symbol=?",
                     (symbol,)
                 )
                 conn.commit()
 
     except Exception:
-        print("Metals scan error:")
+        print("Gate.io scan error:")
         traceback.print_exc()
 
 # =========================
-# (Gate.io, Bitget, CMC scanners unchanged)
+# CMC SCANNER
 # =========================
 
-# --- your existing scanners stay exactly the same ---
-# (scan_gateio, scan_bitget, scan_cmc)
-# I am not repeating them here since they are unchanged.
+async def scan_cmc(first_run=False):
+    print("Scanning CMC...")
+
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
+    params = {"start": "1", "limit": "200", "sort": "date_added", "sort_dir": "desc", "convert": "USD"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CMC_LISTINGS, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    print("CMC API error:", resp.status)
+                    return
+                data = await resp.json()
+
+        for coin in data.get("data", []):
+            coin_id = coin["id"]
+
+            volume = coin["quote"]["USD"].get("volume_24h") or 0
+            current_price = coin["quote"]["USD"].get("price") or 0
+            price_change = coin["quote"]["USD"].get("percent_change_1h") or 0
+            marketcap = coin["quote"]["USD"].get("market_cap") or 0
+
+            slug = coin.get("slug")
+
+            meets_threshold = marketcap >= CMC_MIN_MARKETCAP and volume >= CMC_MIN_VOLUME
+
+            cursor.execute(
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM cmc_listings WHERE id=?",
+                (coin_id,)
+            )
+            row = cursor.fetchone()
+
+            now = int(time.time())
+
+            if not row:
+                cursor.execute(
+                    "INSERT INTO cmc_listings (id, alerted, baseline_volume, baseline_price, last_alert) VALUES (?, ?, ?, ?, ?)",
+                    (coin_id, 0, volume, current_price, 0)
+                )
+                conn.commit()
+                continue
+
+            alerted, baseline_volume, baseline_price, last_alert = row
+
+            if last_alert and (now - last_alert) < COOLDOWN:
+                continue
+
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
+            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
+
+            cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
+            cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
+            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
+
+            pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
+
+            if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+
+                cursor.execute(
+                    "UPDATE cmc_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE id=?",
+                    (volume, current_price, now, coin_id)
+                )
+                conn.commit()
+
+                chart_link = f"https://coinmarketcap.com/currencies/{slug}/"
+
+                message = (
+                    f"🚨 CMC PUMP ALERT\n\n"
+                    f"Pair: {coin['symbol']}USDT\n"
+                    f"Price Change: {cumulative_price_growth:+.2f}%\n"
+                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
+                    f"Volume: ${volume:,.0f}\n"
+                    f"Entry Signal: Consider {signal}\n\n"
+                    f"Chart:\n{chart_link}\n\n"
+                    f"========================\n"
+                    f"powered by @ZeusisHIM"
+                )
+
+                await send_telegram(message)
+
+            elif not pump_condition and alerted == 1:
+                cursor.execute(
+                    "UPDATE cmc_listings SET alerted=0 WHERE id=?",
+                    (coin_id,)
+                )
+                conn.commit()
+
+    except Exception:
+        print("CMC scan error:")
+        traceback.print_exc()
 
 # =========================
 # MAIN LOOP
@@ -201,18 +272,13 @@ async def main():
 
     print("Initializing database silently...")
     await scan_gateio(first_run=True)
-    await scan_bitget(first_run=True)
     await scan_cmc(first_run=True)
-    await scan_metals(first_run=True)
 
     print("Bot running...")
 
     while True:
         await scan_gateio()
-        await scan_bitget()
         await scan_cmc()
-        await scan_metals()
-
         print("Sleeping 60 seconds...\n")
         await asyncio.sleep(CHECK_INTERVAL)
 
