@@ -13,9 +13,11 @@ TELEGRAM_BOT_TOKEN = "8673294426:AAGSrC6j_aUJmzHqlgowolKEBDEMjn01YwA"
 TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
 GATEIO_TICKERS = "https://api.gateio.ws/api/v4/spot/tickers"
+MEXC_TICKERS = "https://api.mexc.com/api/v3/ticker/24hr"
 CMC_LISTINGS = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
 GATEIO_MIN_VOLUME = 5_000_000
+MEXC_MIN_VOLUME = 5_000_000
 CMC_MIN_MARKETCAP = 10_000_000
 CMC_MIN_VOLUME = 1_000_000
 
@@ -34,6 +36,16 @@ cursor = conn.cursor()
 
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS gateio_listings (
+symbol TEXT PRIMARY KEY,
+alerted INTEGER DEFAULT 0,
+baseline_volume REAL DEFAULT 0,
+baseline_price REAL DEFAULT 0,
+last_alert INTEGER DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS mexc_listings (
 symbol TEXT PRIMARY KEY,
 alerted INTEGER DEFAULT 0,
 baseline_volume REAL DEFAULT 0,
@@ -165,6 +177,98 @@ async def scan_gateio(first_run=False):
         traceback.print_exc()
 
 # =========================
+# MEXC SCANNER
+# =========================
+
+async def scan_mexc(first_run=False):
+    print("Scanning MEXC...")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(MEXC_TICKERS) as resp:
+                if resp.status != 200:
+                    print("MEXC API error:", resp.status)
+                    return
+                ticker_data = await resp.json()
+
+        for item in ticker_data:
+
+            symbol = item["symbol"]
+
+            if not symbol.endswith("USDT"):
+                continue
+
+            volume = float(item.get("quoteVolume", 0))
+            current_price = float(item.get("lastPrice", 0))
+            price_change = float(item.get("priceChangePercent", 0))
+
+            meets_threshold = volume >= MEXC_MIN_VOLUME
+
+            cursor.execute(
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM mexc_listings WHERE symbol=?",
+                (symbol,)
+            )
+            row = cursor.fetchone()
+
+            now = int(time.time())
+
+            if not row:
+                cursor.execute(
+                    "INSERT INTO mexc_listings (symbol, alerted, baseline_volume, baseline_price, last_alert) VALUES (?, ?, ?, ?, ?)",
+                    (symbol, 0, volume, current_price, 0)
+                )
+                conn.commit()
+                continue
+
+            alerted, baseline_volume, baseline_price, last_alert = row
+
+            if last_alert and (now - last_alert) < COOLDOWN:
+                continue
+
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
+            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
+
+            cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
+            cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
+            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
+
+            pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
+
+            if pump_condition and alerted == 0:
+
+                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+
+                cursor.execute(
+                    "UPDATE mexc_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
+                    (volume, current_price, now, symbol)
+                )
+                conn.commit()
+
+                message = (
+                    f"🚨 MEXC PUMP ALERT\n\n"
+                    f"Pair: {symbol}\n"
+                    f"Price Change: {price_change:+.2f}%\n"
+                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
+                    f"Volume: ${volume:,.0f}\n"
+                    f"Entry Signal: Consider {signal}\n\n"
+                    f"========================\n"
+                    f"powered by @ZeusisHIM"
+                )
+
+                await send_telegram(message)
+
+            elif not pump_condition and alerted == 1:
+                cursor.execute(
+                    "UPDATE mexc_listings SET alerted=0 WHERE symbol=?",
+                    (symbol,)
+                )
+                conn.commit()
+
+    except Exception:
+        print("MEXC scan error:")
+        traceback.print_exc()
+
+# =========================
 # CMC SCANNER
 # =========================
 
@@ -183,6 +287,7 @@ async def scan_cmc(first_run=False):
                 data = await resp.json()
 
         for coin in data.get("data", []):
+
             coin_id = coin["id"]
 
             volume = coin["quote"]["USD"].get("volume_24h") or 0
@@ -272,12 +377,14 @@ async def main():
 
     print("Initializing database silently...")
     await scan_gateio(first_run=True)
+    await scan_mexc(first_run=True)
     await scan_cmc(first_run=True)
 
     print("Bot running...")
 
     while True:
         await scan_gateio()
+        await scan_mexc()
         await scan_cmc()
         print("Sleeping 60 seconds...\n")
         await asyncio.sleep(CHECK_INTERVAL)
