@@ -144,7 +144,10 @@ async def scan_gateio(first_run=False):
 
             if pump_condition and alerted == 0:
 
-                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+                if price_change > 0:
+                    signal = "Long"
+                else:
+                    signal = "Short"
 
                 cursor.execute(
                     "UPDATE gateio_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -236,7 +239,10 @@ async def scan_mexc(first_run=False):
 
             if pump_condition and alerted == 0:
 
-                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+                if price_change > 0:
+                    signal = "Long"
+                else:
+                    signal = "Short"
 
                 cursor.execute(
                     "UPDATE mexc_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -331,7 +337,10 @@ async def scan_cmc(first_run=False):
 
             if pump_condition and alerted == 0:
 
-                signal = "Long" if cumulative_price_growth >= 0 else "Short"
+                if price_change > 0:
+                    signal = "Long"
+                else:
+                    signal = "Short"
 
                 cursor.execute(
                     "UPDATE cmc_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE id=?",
