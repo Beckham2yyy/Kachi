@@ -200,7 +200,7 @@ async def scan_mexc(first_run=False):
 
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
-            price_change = float(item.get("priceChangePercent", 0))
+            price_change = float(item.get("priceChangePercent", 0)) * 100
 
             meets_threshold = volume >= MEXC_MIN_VOLUME
 
