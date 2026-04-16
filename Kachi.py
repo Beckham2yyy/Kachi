@@ -687,7 +687,8 @@ async def scan_gateio_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE gateio_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
-            if confirmations >= 2:
+            # CHANGED: require 3/3 confirmations
+            if confirmations == 3:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE gateio_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -816,7 +817,8 @@ async def scan_mexc_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE mexc_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
-            if confirmations >= 2:
+            # CHANGED: require 3/3 confirmations
+            if confirmations == 3:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE mexc_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -947,6 +949,7 @@ async def scan_binance_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE binance_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
+            # Binance already required 3/3
             if confirmations < 3:
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
