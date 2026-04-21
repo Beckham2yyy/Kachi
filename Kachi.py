@@ -47,10 +47,10 @@ BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_KLINE_INTERVAL = "5m"
 BINANCE_KLINE_LIMIT = 20
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
-BINANCE_FOOTPRINT_THRESHOLD = 0.2   # reduced from 0.3
-BINANCE_CVD_THRESHOLD = 20000       # reduced from 50000
-BINANCE_PRICE_CHANGE_THRESHOLD = 1.5  # reduced from 3
-BINANCE_VOLUME_SPIKE_PERCENT = 12   # new, reduced from 20
+BINANCE_FOOTPRINT_THRESHOLD = 0.2          # reduced from 0.3
+BINANCE_CVD_THRESHOLD = 20000              # reduced from 50000
+BINANCE_PRICE_CHANGE_THRESHOLD = 1.5       # reduced from 3
+BINANCE_VOLUME_SPIKE_PERCENT = 12          # new, reduced from 20
 
 # RSI points threshold for already-in-zone confirmation (unchanged)
 RSI_POINTS_THRESHOLD = 4
