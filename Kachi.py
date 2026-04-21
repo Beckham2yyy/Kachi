@@ -47,11 +47,12 @@ BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_KLINE_INTERVAL = "5m"
 BINANCE_KLINE_LIMIT = 20
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
-BINANCE_FOOTPRINT_THRESHOLD = 0.3   # absolute imbalance required
-BINANCE_CVD_THRESHOLD = 50000       # minimum absolute CVD in USDT
-BINANCE_PRICE_CHANGE_THRESHOLD = 3  # 3% for Binance (lower than other exchanges)
+BINANCE_FOOTPRINT_THRESHOLD = 0.2   # reduced from 0.3
+BINANCE_CVD_THRESHOLD = 20000       # reduced from 50000
+BINANCE_PRICE_CHANGE_THRESHOLD = 1.5  # reduced from 3
+BINANCE_VOLUME_SPIKE_PERCENT = 12   # new, reduced from 20
 
-# RSI points threshold for already-in-zone confirmation
+# RSI points threshold for already-in-zone confirmation (unchanged)
 RSI_POINTS_THRESHOLD = 4
 
 # Big coins that get a lower price change threshold (2%)
@@ -687,8 +688,7 @@ async def scan_gateio_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE gateio_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
-            # CHANGED: require 3/3 confirmations
-            if confirmations == 3:
+            if confirmations >= 2:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE gateio_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -817,8 +817,7 @@ async def scan_mexc_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE mexc_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
-            # CHANGED: require 3/3 confirmations
-            if confirmations == 3:
+            if confirmations >= 2:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE mexc_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -852,7 +851,7 @@ async def scan_mexc_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# BINANCE FUTURES SCANNER (with big coin threshold)
+# BINANCE FUTURES SCANNER (with reduced thresholds)
 # =========================
 
 async def scan_binance_futures(first_run=False):
@@ -894,12 +893,12 @@ async def scan_binance_futures(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            # Trigger conditions (using threshold)
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
+            # Trigger conditions using Binance-specific volume spike threshold
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= BINANCE_VOLUME_SPIKE_PERCENT)
             instant_price_spike = abs(price_change) >= threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and abs(cumulative_price_growth) >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= BINANCE_VOLUME_SPIKE_PERCENT and abs(cumulative_price_growth) >= threshold
             trigger = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if not trigger:
                 if alerted == 1:
@@ -949,7 +948,6 @@ async def scan_binance_futures(first_run=False):
             if rsi is not None:
                 cursor.execute("UPDATE binance_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
                 conn.commit()
-            # Binance already required 3/3
             if confirmations < 3:
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -960,7 +958,7 @@ async def scan_binance_futures(first_run=False):
                 ws_data = binance_ws_data.get(symbol, {})
                 footprint = ws_data.get('footprint', 0)
                 cvd = ws_data.get('cvd', 0)
-            # Apply footprint and CVD filters with thresholds
+            # Apply footprint and CVD filters with reduced thresholds
             if signal == "Long":
                 if footprint <= BINANCE_FOOTPRINT_THRESHOLD or cvd <= BINANCE_CVD_THRESHOLD:
                     if alerted == 1:
