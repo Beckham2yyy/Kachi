@@ -47,11 +47,14 @@ BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_KLINE_INTERVAL = "5m"
 BINANCE_KLINE_LIMIT = 20
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
-# Binance-specific thresholds (more sensitive)
-BINANCE_PRICE_CHANGE_THRESHOLD = 1.5    # was 3% → now 1.5%
-BINANCE_VOLUME_SPIKE_PERCENT = 10       # was 20% → now 10%
-BINANCE_FOOTPRINT_THRESHOLD = 0.15      # was 0.3 → now 0.15
-BINANCE_CVD_THRESHOLD = 20000           # was 50000 → now 20k USDT
+BINANCE_FOOTPRINT_THRESHOLD = 0.3   # absolute imbalance required
+BINANCE_CVD_THRESHOLD = 50000       # minimum absolute CVD in USDT
+BINANCE_PRICE_CHANGE_THRESHOLD = 3  # 3% for Binance (lower than other exchanges)
+
+# Dynamic thresholds for small coins (based on 24h volume)
+SMALL_COIN_MAX_VOLUME = 2_000_000      # USDT
+SMALL_COIN_PRICE_THRESHOLD = 1.5       # %
+SMALL_COIN_VOLUME_SPIKE = 10           # %
 
 # RSI points threshold for already-in-zone confirmation
 RSI_POINTS_THRESHOLD = 4
@@ -370,7 +373,7 @@ async def send_telegram(message):
         print("Telegram send failed:", e)
 
 # =========================
-# GATE.IO SCANNER (with big coin threshold)
+# GATE.IO SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_gateio(first_run=False):
@@ -388,15 +391,22 @@ async def scan_gateio(first_run=False):
                 continue
             # Determine base asset
             base = symbol.split("_")[0]
-            # Select threshold
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = PRICE_SPIKE_PERCENT
             volume = float(item.get("quote_volume", 0))
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= GATEIO_MIN_VOLUME
+
+            # Dynamic thresholds
+            if base in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = PRICE_SPIKE_PERCENT
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM gateio_listings WHERE symbol=?",
                 (symbol,)
@@ -413,11 +423,11 @@ async def scan_gateio(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = price_change >= threshold
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = price_change >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and cumulative_price_growth >= price_threshold
             pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if pump_condition and alerted == 0:
                 signal = "Long" if price_change > 0 else "Short"
@@ -445,7 +455,7 @@ async def scan_gateio(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC SCANNER (with big coin threshold)
+# MEXC SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_mexc(first_run=False):
@@ -466,14 +476,22 @@ async def scan_mexc(first_run=False):
                 base = symbol[:-4]
             else:
                 base = symbol
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = PRICE_SPIKE_PERCENT
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0)) * 100
             meets_threshold = volume >= MEXC_MIN_VOLUME
+
+            # Dynamic thresholds
+            if base in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = PRICE_SPIKE_PERCENT
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM mexc_listings WHERE symbol=?",
                 (symbol,)
@@ -490,11 +508,11 @@ async def scan_mexc(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = price_change >= threshold
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = price_change >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and cumulative_price_growth >= price_threshold
             pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if pump_condition and alerted == 0:
                 signal = "Long" if price_change > 0 else "Short"
@@ -522,7 +540,7 @@ async def scan_mexc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# CMC SCANNER (unchanged – no klines)
+# CMC SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_cmc(first_run=False):
@@ -543,7 +561,20 @@ async def scan_cmc(first_run=False):
             price_change = coin["quote"]["USD"].get("percent_change_1h") or 0
             marketcap = coin["quote"]["USD"].get("market_cap") or 0
             slug = coin.get("slug")
+            symbol = coin["symbol"]
             meets_threshold = marketcap >= CMC_MIN_MARKETCAP and volume >= CMC_MIN_VOLUME
+
+            # Dynamic thresholds: treat CMC symbol as base
+            if symbol in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = PRICE_SPIKE_PERCENT
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM cmc_listings WHERE id=?",
                 (coin_id,)
@@ -560,11 +591,11 @@ async def scan_cmc(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = price_change >= PRICE_SPIKE_PERCENT
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = price_change >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and cumulative_price_growth >= PRICE_SPIKE_PERCENT
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and cumulative_price_growth >= price_threshold
             pump_condition = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if pump_condition and alerted == 0:
                 signal = "Long" if price_change > 0 else "Short"
@@ -576,7 +607,7 @@ async def scan_cmc(first_run=False):
                 chart_link = f"https://coinmarketcap.com/currencies/{slug}/"
                 message = (
                     f"🚨 CMC PUMP ALERT\n\n"
-                    f"Pair: {coin['symbol']}USDT\n"
+                    f"Pair: {symbol}USDT\n"
                     f"Price Change: {cumulative_price_growth:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -594,7 +625,7 @@ async def scan_cmc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# GATE.IO FUTURES SCANNER (with big coin threshold)
+# GATE.IO FUTURES SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_gateio_futures(first_run=False):
@@ -611,14 +642,22 @@ async def scan_gateio_futures(first_run=False):
             if not symbol.endswith("_USDT"):
                 continue
             base = symbol.split("_")[0]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("volume_24h_quote", 0))
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
+
+            # Dynamic thresholds
+            if base in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = FUTURES_PRICE_CHANGE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM gateio_futures_listings WHERE symbol=?",
                 (symbol,)
@@ -635,11 +674,11 @@ async def scan_gateio_futures(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = abs(price_change) >= threshold
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = abs(price_change) >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and abs(cumulative_price_growth) >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and abs(cumulative_price_growth) >= price_threshold
             trigger = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if not trigger:
                 if alerted == 1:
@@ -724,7 +763,7 @@ async def scan_gateio_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC FUTURES SCANNER (with big coin threshold)
+# MEXC FUTURES SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_mexc_futures(first_run=False):
@@ -742,14 +781,22 @@ async def scan_mexc_futures(first_run=False):
             if not symbol.endswith("USDT"):
                 continue
             base = symbol.split("_")[0]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("amount24", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("riseFallRate", 0)) * 100
             meets_threshold = volume >= FUTURES_MIN_VOLUME
+
+            # Dynamic thresholds
+            if base in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = FUTURES_PRICE_CHANGE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM mexc_futures_listings WHERE symbol=?",
                 (symbol,)
@@ -766,11 +813,11 @@ async def scan_mexc_futures(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
-            instant_price_spike = abs(price_change) >= threshold
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = abs(price_change) >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= VOLUME_SPIKE_PERCENT and abs(cumulative_price_growth) >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and abs(cumulative_price_growth) >= price_threshold
             trigger = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if not trigger:
                 if alerted == 1:
@@ -854,7 +901,7 @@ async def scan_mexc_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# BINANCE FUTURES SCANNER (with big coin threshold)
+# BINANCE FUTURES SCANNER (with dynamic thresholds)
 # =========================
 
 async def scan_binance_futures(first_run=False):
@@ -872,14 +919,22 @@ async def scan_binance_futures(first_run=False):
                 continue
             # Base asset (e.g., "BTCUSDT" -> "BTC")
             base = symbol[:-4]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = BINANCE_PRICE_CHANGE_THRESHOLD   # now 1.5%
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
+
+            # Dynamic thresholds (Binance already has lower base thresholds, but we apply small coin logic)
+            if base in BIG_COINS:
+                price_threshold = BIG_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = VOLUME_SPIKE_PERCENT
+            elif volume < SMALL_COIN_MAX_VOLUME:
+                price_threshold = SMALL_COIN_PRICE_THRESHOLD
+                volume_spike_threshold = SMALL_COIN_VOLUME_SPIKE
+            else:
+                price_threshold = BINANCE_PRICE_CHANGE_THRESHOLD
+                volume_spike_threshold = BINANCE_VOLUME_SPIKE_PERCENT if 'BINANCE_VOLUME_SPIKE_PERCENT' in globals() else VOLUME_SPIKE_PERCENT
+
             cursor.execute(
                 "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM binance_futures_listings WHERE symbol=?",
                 (symbol,)
@@ -896,12 +951,12 @@ async def scan_binance_futures(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            # Trigger conditions using Binance-specific volume spike threshold
-            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= BINANCE_VOLUME_SPIKE_PERCENT)
-            instant_price_spike = abs(price_change) >= threshold
+            # Trigger conditions using dynamic thresholds
+            instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= volume_spike_threshold)
+            instant_price_spike = abs(price_change) >= price_threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
             cumulative_price_growth = ((current_price - baseline_price) / baseline_price * 100) if baseline_price > 0 else 0
-            cumulative_growth_trigger = cumulative_volume_growth >= BINANCE_VOLUME_SPIKE_PERCENT and abs(cumulative_price_growth) >= threshold
+            cumulative_growth_trigger = cumulative_volume_growth >= volume_spike_threshold and abs(cumulative_price_growth) >= price_threshold
             trigger = meets_threshold and ((instant_volume_spike and instant_price_spike) or cumulative_growth_trigger)
             if not trigger:
                 if alerted == 1:
@@ -961,7 +1016,7 @@ async def scan_binance_futures(first_run=False):
                 ws_data = binance_ws_data.get(symbol, {})
                 footprint = ws_data.get('footprint', 0)
                 cvd = ws_data.get('cvd', 0)
-            # Apply Binance-specific footprint and CVD filters
+            # Apply footprint and CVD filters with thresholds
             if signal == "Long":
                 if footprint <= BINANCE_FOOTPRINT_THRESHOLD or cvd <= BINANCE_CVD_THRESHOLD:
                     if alerted == 1:
