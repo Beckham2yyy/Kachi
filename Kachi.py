@@ -27,7 +27,7 @@ CMC_MIN_VOLUME = 1_000_000
 PRICE_SPIKE_PERCENT = 5
 VOLUME_SPIKE_PERCENT = 20
 
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 15
 COOLDOWN = 60 * 60
 
 # Futures specific config
@@ -37,14 +37,14 @@ FUTURES_MIN_VOLUME = 10_000_000
 FUTURES_PRICE_CHANGE_THRESHOLD = 5  # absolute % change required
 
 # Kline config for confirmations
-KLINE_INTERVAL = "5m"          # Gate.io
-MEXC_KLINE_INTERVAL = "Min5"   # MEXC
+KLINE_INTERVAL = "1m"          # Gate.io
+MEXC_KLINE_INTERVAL = "Min1"   # MEXC
 KLINE_LIMIT = 20               # enough for EMA20 and RSI14
 
 # Binance Futures config
 BINANCE_FUTURES_TICKERS = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
-BINANCE_KLINE_INTERVAL = "5m"
+BINANCE_KLINE_INTERVAL = "1m"
 BINANCE_KLINE_LIMIT = 20
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
 BINANCE_FOOTPRINT_THRESHOLD = 0.3   # absolute imbalance required
@@ -53,8 +53,8 @@ BINANCE_PRICE_CHANGE_THRESHOLD = 3  # 3% for Binance (lower than other exchanges
 
 # Dynamic thresholds for small coins (based on 24h volume)
 SMALL_COIN_MAX_VOLUME = 2_000_000      # USDT
-SMALL_COIN_PRICE_THRESHOLD = 1.5       # %
-SMALL_COIN_VOLUME_SPIKE = 10           # %
+SMALL_COIN_PRICE_THRESHOLD = 0.8       # %
+SMALL_COIN_VOLUME_SPIKE = 5            # %
 
 # RSI points threshold for already-in-zone confirmation
 RSI_POINTS_THRESHOLD = 4
