@@ -59,9 +59,6 @@ RSI_POINTS_THRESHOLD = 4
 BIG_COINS = ["BTC", "ETH", "SOL"]
 BIG_COIN_PRICE_THRESHOLD = 2
 
-# Allowed coins – only these will be scanned
-ALLOWED_COINS = ["BTC", "ETH", "SOL", "XRP", "BNB", "DOGE"]
-
 # =========================
 # DATABASE
 # =========================
@@ -372,7 +369,7 @@ async def send_telegram(message):
         print("Telegram send failed:", e)
 
 # =========================
-# GATE.IO SCANNER (with big coin threshold + allowed coins filter)
+# GATE.IO SCANNER (with big coin threshold)
 # =========================
 
 async def scan_gateio(first_run=False):
@@ -390,9 +387,6 @@ async def scan_gateio(first_run=False):
                 continue
             # Determine base asset
             base = symbol.split("_")[0]
-            # Filter: only allowed coins
-            if base not in ALLOWED_COINS:
-                continue
             # Select threshold
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
@@ -450,7 +444,7 @@ async def scan_gateio(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC SCANNER (with big coin threshold + allowed coins filter)
+# MEXC SCANNER (with big coin threshold)
 # =========================
 
 async def scan_mexc(first_run=False):
@@ -471,9 +465,6 @@ async def scan_mexc(first_run=False):
                 base = symbol[:-4]
             else:
                 base = symbol
-            # Filter: only allowed coins
-            if base not in ALLOWED_COINS:
-                continue
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
             else:
@@ -530,7 +521,7 @@ async def scan_mexc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# CMC SCANNER (filter allowed coins)
+# CMC SCANNER (unchanged – no klines)
 # =========================
 
 async def scan_cmc(first_run=False):
@@ -545,9 +536,6 @@ async def scan_cmc(first_run=False):
                     return
                 data = await resp.json()
         for coin in data.get("data", []):
-            # Filter: only allowed coins
-            if coin["symbol"] not in ALLOWED_COINS:
-                continue
             coin_id = coin["id"]
             volume = coin["quote"]["USD"].get("volume_24h") or 0
             current_price = coin["quote"]["USD"].get("price") or 0
@@ -605,7 +593,7 @@ async def scan_cmc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# GATE.IO FUTURES SCANNER (filter allowed coins)
+# GATE.IO FUTURES SCANNER (with big coin threshold)
 # =========================
 
 async def scan_gateio_futures(first_run=False):
@@ -622,9 +610,6 @@ async def scan_gateio_futures(first_run=False):
             if not symbol.endswith("_USDT"):
                 continue
             base = symbol.split("_")[0]
-            # Filter: only allowed coins
-            if base not in ALLOWED_COINS:
-                continue
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
             else:
@@ -737,7 +722,7 @@ async def scan_gateio_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC FUTURES SCANNER (filter allowed coins)
+# MEXC FUTURES SCANNER (with big coin threshold)
 # =========================
 
 async def scan_mexc_futures(first_run=False):
@@ -755,9 +740,6 @@ async def scan_mexc_futures(first_run=False):
             if not symbol.endswith("USDT"):
                 continue
             base = symbol.split("_")[0]
-            # Filter: only allowed coins
-            if base not in ALLOWED_COINS:
-                continue
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
             else:
@@ -869,7 +851,7 @@ async def scan_mexc_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# BINANCE FUTURES SCANNER (filter allowed coins)
+# BINANCE FUTURES SCANNER (with reduced thresholds)
 # =========================
 
 async def scan_binance_futures(first_run=False):
@@ -887,9 +869,6 @@ async def scan_binance_futures(first_run=False):
                 continue
             # Base asset (e.g., "BTCUSDT" -> "BTC")
             base = symbol[:-4]
-            # Filter: only allowed coins
-            if base not in ALLOWED_COINS:
-                continue
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
             else:
