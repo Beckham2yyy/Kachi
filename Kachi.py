@@ -30,25 +30,6 @@ VOLUME_SPIKE_PERCENT = 20
 CHECK_INTERVAL = 60
 COOLDOWN = 60 * 60
 
-# =========================
-# TIMEFRAME
-# =========================
-
-TIMEFRAME = "1hr"
-
-TIMEFRAME_MAP = {
-    "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
-    "30m": {"gateio": "30m", "mexc": "Min30", "binance": "30m"},
-    "1hr": {"gateio": "1h",  "mexc": "Min60", "binance": "1h"},
-}
-
-if TIMEFRAME not in TIMEFRAME_MAP:
-    raise ValueError(f"Invalid TIMEFRAME '{TIMEFRAME}'. Allowed: 1d, 30m, 1hr")
-
-TF_GATEIO = TIMEFRAME_MAP[TIMEFRAME]["gateio"]
-TF_MEXC = TIMEFRAME_MAP[TIMEFRAME]["mexc"]
-TF_BINANCE = TIMEFRAME_MAP[TIMEFRAME]["binance"]
-
 # Futures specific config
 GATEIO_FUTURES_TICKERS = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
 MEXC_FUTURES_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
@@ -75,6 +56,28 @@ RSI_POINTS_THRESHOLD = 4
 
 BIG_COINS = ["BTC", "ETH", "SOL"]
 BIG_COIN_PRICE_THRESHOLD = 2
+
+# =========================
+# TIMEFRAME (EDITABLE VIA TELEGRAM)
+# =========================
+
+CURRENT_TIMEFRAME = "1hr"
+ALLOWED_TIMEFRAMES = ("1d", "30m", "1hr")
+
+TIMEFRAME_MAP = {
+    "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
+    "30m": {"gateio": "30m", "mexc": "Min30", "binance": "30m"},
+    "1hr": {"gateio": "1h",  "mexc": "Min60", "binance": "1h"},
+}
+
+def get_tf_gateio():
+    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["gateio"]
+
+def get_tf_mexc():
+    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["mexc"]
+
+def get_tf_binance():
+    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["binance"]
 
 # =========================
 # DATABASE
@@ -189,8 +192,7 @@ def calculate_rsi(closes, period=14):
     if avg_loss == 0:
         return 100
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 def calculate_candle_strength(open_price, close, high, low):
     body = abs(close - open_price)
@@ -217,7 +219,9 @@ def calculate_cvd(trades):
             cvd -= qty
     return cvd
 
-async def fetch_gateio_klines(symbol, interval=TF_GATEIO, limit=KLINE_LIMIT):
+async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
+    if interval is None:
+        interval = get_tf_gateio()
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -234,7 +238,9 @@ async def fetch_gateio_klines(symbol, interval=TF_GATEIO, limit=KLINE_LIMIT):
         except Exception:
             return None
 
-async def fetch_mexc_klines(symbol, interval=TF_MEXC, limit=KLINE_LIMIT):
+async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
+    if interval is None:
+        interval = get_tf_mexc()
     url = f"https://futures.mexc.com/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -258,7 +264,9 @@ async def fetch_mexc_klines(symbol, interval=TF_MEXC, limit=KLINE_LIMIT):
         except Exception:
             return None
 
-async def fetch_binance_klines(symbol, interval=TF_BINANCE, limit=BINANCE_KLINE_LIMIT):
+async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT):
+    if interval is None:
+        interval = get_tf_binance()
     url = f"{BINANCE_FUTURES_KLINES}?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -341,7 +349,7 @@ async def handle_binance_ws_connection(url):
             await asyncio.sleep(5)
 
 # =========================
-# TELEGRAM
+# TELEGRAM (send)
 # =========================
 
 async def send_telegram(message):
@@ -349,15 +357,119 @@ async def send_telegram(message):
         async with aiohttp.ClientSession() as session:
             for chat_id in TELEGRAM_CHAT_IDS:
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-                payload = {
-                    "chat_id": chat_id,
-                    "text": message
-                }
+                payload = {"chat_id": chat_id, "text": message}
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         print(f"Telegram error for {chat_id}:", resp.status)
     except Exception as e:
         print("Telegram send failed:", e)
+
+# =========================
+# TELEGRAM (timeframe UI + polling)
+# =========================
+
+def timeframe_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "1d",  "callback_data": "tf:1d"},
+                {"text": "30m", "callback_data": "tf:30m"},
+                {"text": "1hr", "callback_data": "tf:1hr"},
+            ]
+        ]
+    }
+
+async def send_timeframe_picker(session, chat_id, text=None):
+    if text is None:
+        text = (
+            f"⏱ Timeframe Settings\n\n"
+            f"Current: {CURRENT_TIMEFRAME}\n\n"
+            f"Tap a button to change."
+        )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": timeframe_keyboard()}
+    async with session.post(url, json=payload) as resp:
+        if resp.status != 200:
+            print(f"Telegram picker error for {chat_id}:", resp.status)
+
+async def answer_callback(session, callback_id, text=""):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_id, "text": text}
+    async with session.post(url, json=payload):
+        pass
+
+async def edit_message(session, chat_id, message_id, text, reply_markup=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    async with session.post(url, json=payload):
+        pass
+
+async def handle_message(session, message):
+    chat_id = message.get("chat", {}).get("id")
+    if str(chat_id) not in TELEGRAM_CHAT_IDS:
+        return
+    text = (message.get("text") or "").strip()
+    if text.startswith("/timeframe") or text.startswith("/start"):
+        await send_timeframe_picker(session, chat_id)
+
+async def handle_callback(session, callback):
+    global CURRENT_TIMEFRAME
+    data = callback.get("data", "")
+    callback_id = callback.get("id")
+    message = callback.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+    if str(chat_id) not in TELEGRAM_CHAT_IDS:
+        await answer_callback(session, callback_id, "Not authorized.")
+        return
+    if not data.startswith("tf:"):
+        await answer_callback(session, callback_id, "Unknown action.")
+        return
+    new_tf = data[3:]
+    if new_tf not in ALLOWED_TIMEFRAMES:
+        await answer_callback(session, callback_id, "Invalid timeframe.")
+        return
+    old_tf = CURRENT_TIMEFRAME
+    CURRENT_TIMEFRAME = new_tf
+    await answer_callback(session, callback_id, f"Set to {new_tf}")
+    new_text = (
+        f"⏱ Timeframe Settings\n\n"
+        f"Current: {CURRENT_TIMEFRAME}  (was {old_tf})\n\n"
+        f"Tap a button to change."
+    )
+    await edit_message(session, chat_id, message_id, new_text, timeframe_keyboard())
+
+async def poll_telegram():
+    offset = None
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+                params = {
+                    "timeout": 30,
+                    "allowed_updates": json.dumps(["message", "callback_query"]),
+                }
+                if offset is not None:
+                    params["offset"] = offset
+                async with session.get(url, params=params) as resp:
+                    if resp.status != 200:
+                        await asyncio.sleep(3)
+                        continue
+                    data = await resp.json()
+                for update in data.get("result", []):
+                    offset = update["update_id"] + 1
+                    try:
+                        if "message" in update:
+                            await handle_message(session, update["message"])
+                        elif "callback_query" in update:
+                            await handle_callback(session, update["callback_query"])
+                    except Exception as e:
+                        print("Telegram update handling error:", e)
+            except Exception as e:
+                print("Telegram poll error:", e)
+                await asyncio.sleep(5)
 
 # =========================
 # GATE.IO SCANNER
@@ -377,10 +489,7 @@ async def scan_gateio(first_run=False):
             if not symbol.endswith("_USDT"):
                 continue
             base = symbol.split("_")[0]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = PRICE_SPIKE_PERCENT
+            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else PRICE_SPIKE_PERCENT
             volume = float(item.get("quote_volume", 0))
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
@@ -417,7 +526,7 @@ async def scan_gateio(first_run=False):
                 message = (
                     f"🚨 GATE.IO PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
-                    f"⏱ Timeframe: {TIMEFRAME}\n"
+                    f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -450,14 +559,8 @@ async def scan_mexc(first_run=False):
             symbol = item["symbol"]
             if not symbol.endswith("USDT"):
                 continue
-            if symbol.endswith("USDT"):
-                base = symbol[:-4]
-            else:
-                base = symbol
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = PRICE_SPIKE_PERCENT
+            base = symbol[:-4] if symbol.endswith("USDT") else symbol
+            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else PRICE_SPIKE_PERCENT
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0)) * 100
@@ -494,7 +597,7 @@ async def scan_mexc(first_run=False):
                 message = (
                     f"🚨 MEXC PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
-                    f"⏱ Timeframe: {TIMEFRAME}\n"
+                    f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -566,7 +669,7 @@ async def scan_cmc(first_run=False):
                 message = (
                     f"🚨 CMC PUMP ALERT\n\n"
                     f"Pair: {coin['symbol']}USDT\n"
-                    f"⏱ Timeframe: {TIMEFRAME}\n"
+                    f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {cumulative_price_growth:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -601,10 +704,7 @@ async def scan_gateio_futures(first_run=False):
             if not symbol.endswith("_USDT"):
                 continue
             base = symbol.split("_")[0]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = FUTURES_PRICE_CHANGE_THRESHOLD
+            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("volume_24h_quote", 0))
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
@@ -691,7 +791,7 @@ async def scan_gateio_futures(first_run=False):
                     message = (
                         f"🚨 GATE.IO FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: {TIMEFRAME}\n"
+                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -731,10 +831,7 @@ async def scan_mexc_futures(first_run=False):
             if not symbol.endswith("USDT"):
                 continue
             base = symbol.split("_")[0]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = FUTURES_PRICE_CHANGE_THRESHOLD
+            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("amount24", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("riseFallRate", 0)) * 100
@@ -821,7 +918,7 @@ async def scan_mexc_futures(first_run=False):
                     message = (
                         f"🚨 MEXC FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: {TIMEFRAME}\n"
+                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -860,10 +957,7 @@ async def scan_binance_futures(first_run=False):
             if not symbol.endswith("USDT"):
                 continue
             base = symbol[:-4]
-            if base in BIG_COINS:
-                threshold = BIG_COIN_PRICE_THRESHOLD
-            else:
-                threshold = BINANCE_PRICE_CHANGE_THRESHOLD
+            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else BINANCE_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0))
@@ -972,7 +1066,7 @@ async def scan_binance_futures(first_run=False):
                 message = (
                     f"🚨 BINANCE FUTURES PUMP ALERT\n\n"
                     f"Contract: {symbol}\n"
-                    f"⏱ Timeframe: {TIMEFRAME}\n"
+                    f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -997,9 +1091,14 @@ async def scan_binance_futures(first_run=False):
 
 async def main():
     print("Starting Kachi...")
-    await send_telegram(f"Sniping 🍁\n⏱ Timeframe: {TIMEFRAME}")
+    await send_telegram(
+        f"Sniping 🍁\n"
+        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n\n"
+        f"Send /timeframe to change."
+    )
 
     asyncio.create_task(binance_ws_manager())
+    asyncio.create_task(poll_telegram())
 
     print("Initializing database silently...")
     await scan_gateio(first_run=True)
