@@ -80,6 +80,30 @@ def get_tf_binance():
     return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["binance"]
 
 # =========================
+# TRADINGVIEW URL HELPER
+# =========================
+
+def tradingview_url(exchange, raw_symbol):
+    if exchange == "gateio_spot":
+        base = raw_symbol.replace("_", "")
+        tv_sym = f"GATEIO:{base}"
+    elif exchange == "gateio_fut":
+        base = raw_symbol.replace("_", "")
+        tv_sym = f"GATEIO:{base}.P"
+    elif exchange == "mexc_spot":
+        tv_sym = f"MEXC:{raw_symbol}"
+    elif exchange == "mexc_fut":
+        base = raw_symbol.replace("_", "")
+        tv_sym = f"MEXC:{base}.P"
+    elif exchange == "binance_fut":
+        tv_sym = f"BINANCE:{raw_symbol}.P"
+    elif exchange == "cmc":
+        tv_sym = f"BINANCE:{raw_symbol}USDT"
+    else:
+        tv_sym = raw_symbol
+    return f"https://www.tradingview.com/chart/?symbol={tv_sym}"
+
+# =========================
 # DATABASE
 # =========================
 
@@ -352,12 +376,18 @@ async def handle_binance_ws_connection(url):
 # TELEGRAM (send)
 # =========================
 
-async def send_telegram(message):
+async def send_telegram(message, chart_url=None):
     try:
         async with aiohttp.ClientSession() as session:
             for chat_id in TELEGRAM_CHAT_IDS:
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": message}
+                if chart_url:
+                    payload["reply_markup"] = {
+                        "inline_keyboard": [[
+                            {"text": "📊 Chart", "url": chart_url}
+                        ]]
+                    }
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         print(f"Telegram error for {chat_id}:", resp.status)
@@ -531,10 +561,9 @@ async def scan_gateio(first_run=False):
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n\n"
-                    f"========================\n"
-                    f"powered by @ZeusisHIM"
+                    f"========================"
                 )
-                await send_telegram(message)
+                await send_telegram(message, tradingview_url("gateio_spot", symbol))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE gateio_listings SET alerted=0 WHERE symbol=?", (symbol,))
                 conn.commit()
@@ -602,10 +631,9 @@ async def scan_mexc(first_run=False):
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n\n"
-                    f"========================\n"
-                    f"powered by @ZeusisHIM"
+                    f"========================"
                 )
-                await send_telegram(message)
+                await send_telegram(message, tradingview_url("mexc_spot", symbol))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE mexc_listings SET alerted=0 WHERE symbol=?", (symbol,))
                 conn.commit()
@@ -675,10 +703,9 @@ async def scan_cmc(first_run=False):
                     f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n\n"
                     f"Chart:\n{chart_link}\n\n"
-                    f"========================\n"
-                    f"powered by @ZeusisHIM"
+                    f"========================"
                 )
-                await send_telegram(message)
+                await send_telegram(message, tradingview_url("cmc", coin['symbol']))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE cmc_listings SET alerted=0 WHERE id=?", (coin_id,))
                 conn.commit()
@@ -800,10 +827,9 @@ async def scan_gateio_futures(first_run=False):
                         f"EMA20: {ema_str}\n"
                         f"RSI: {rsi_str}\n"
                         f"Candle Strength: {strength_str}\n\n"
-                        f"========================\n"
-                        f"powered by @ZeusisHIM"
+                        f"========================"
                     )
-                    await send_telegram(message)
+                    await send_telegram(message, tradingview_url("gateio_fut", symbol))
             else:
                 if alerted == 1:
                     cursor.execute("UPDATE gateio_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -927,10 +953,9 @@ async def scan_mexc_futures(first_run=False):
                         f"EMA20: {ema_str}\n"
                         f"RSI: {rsi_str}\n"
                         f"Candle Strength: {strength_str}\n\n"
-                        f"========================\n"
-                        f"powered by @ZeusisHIM"
+                        f"========================"
                     )
-                    await send_telegram(message)
+                    await send_telegram(message, tradingview_url("mexc_fut", symbol))
             else:
                 if alerted == 1:
                     cursor.execute("UPDATE mexc_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -1077,10 +1102,9 @@ async def scan_binance_futures(first_run=False):
                     f"Candle Strength: {strength_str}\n"
                     f"Footprint (Bid/Ask Imbalance): {footprint_str}\n"
                     f"CVD (Net Buying Volume): {cvd_str}\n\n"
-                    f"========================\n"
-                    f"powered by @ZeusisHIM"
+                    f"========================"
                 )
-                await send_telegram(message)
+                await send_telegram(message, tradingview_url("binance_fut", symbol))
     except Exception:
         print("Binance Futures scan error:")
         traceback.print_exc()
