@@ -30,16 +30,35 @@ VOLUME_SPIKE_PERCENT = 20
 CHECK_INTERVAL = 60
 COOLDOWN = 60 * 60
 
+# =========================
+# TIMEFRAME
+# =========================
+
+TIMEFRAME = "1hr"
+
+TIMEFRAME_MAP = {
+    "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
+    "30m": {"gateio": "30m", "mexc": "Min30", "binance": "30m"},
+    "1hr": {"gateio": "1h",  "mexc": "Min60", "binance": "1h"},
+}
+
+if TIMEFRAME not in TIMEFRAME_MAP:
+    raise ValueError(f"Invalid TIMEFRAME '{TIMEFRAME}'. Allowed: 1d, 30m, 1hr")
+
+TF_GATEIO = TIMEFRAME_MAP[TIMEFRAME]["gateio"]
+TF_MEXC = TIMEFRAME_MAP[TIMEFRAME]["mexc"]
+TF_BINANCE = TIMEFRAME_MAP[TIMEFRAME]["binance"]
+
 # Futures specific config
 GATEIO_FUTURES_TICKERS = "https://api.gateio.ws/api/v4/futures/usdt/tickers"
 MEXC_FUTURES_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
 FUTURES_MIN_VOLUME = 10_000_000
-FUTURES_PRICE_CHANGE_THRESHOLD = 5  # absolute % change required
+FUTURES_PRICE_CHANGE_THRESHOLD = 5
 
-# Kline config for confirmations
-KLINE_INTERVAL = "5m"          # Gate.io
-MEXC_KLINE_INTERVAL = "Min5"   # MEXC
-KLINE_LIMIT = 20               # enough for EMA20 and RSI14
+# Kline config
+KLINE_INTERVAL = "5m"
+MEXC_KLINE_INTERVAL = "Min5"
+KLINE_LIMIT = 20
 
 # Binance Futures config
 BINANCE_FUTURES_TICKERS = "https://fapi.binance.com/fapi/v1/ticker/24hr"
@@ -47,15 +66,13 @@ BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_KLINE_INTERVAL = "5m"
 BINANCE_KLINE_LIMIT = 20
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
-BINANCE_FOOTPRINT_THRESHOLD = 0.2          # reduced from 0.3
-BINANCE_CVD_THRESHOLD = 20000              # reduced from 50000
-BINANCE_PRICE_CHANGE_THRESHOLD = 1.5       # reduced from 3
-BINANCE_VOLUME_SPIKE_PERCENT = 12          # new, reduced from 20
+BINANCE_FOOTPRINT_THRESHOLD = 0.2
+BINANCE_CVD_THRESHOLD = 20000
+BINANCE_PRICE_CHANGE_THRESHOLD = 1.5
+BINANCE_VOLUME_SPIKE_PERCENT = 12
 
-# RSI points threshold for already-in-zone confirmation (unchanged)
 RSI_POINTS_THRESHOLD = 4
 
-# Big coins that get a lower price change threshold (2%)
 BIG_COINS = ["BTC", "ETH", "SOL"]
 BIG_COIN_PRICE_THRESHOLD = 2
 
@@ -66,7 +83,6 @@ BIG_COIN_PRICE_THRESHOLD = 2
 conn = sqlite3.connect("listings.db")
 cursor = conn.cursor()
 
-# Gate.io spot
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS gateio_listings (
     symbol TEXT PRIMARY KEY,
@@ -78,7 +94,6 @@ CREATE TABLE IF NOT EXISTS gateio_listings (
 )
 """)
 
-# MEXC spot
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS mexc_listings (
     symbol TEXT PRIMARY KEY,
@@ -90,7 +105,6 @@ CREATE TABLE IF NOT EXISTS mexc_listings (
 )
 """)
 
-# CMC
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS cmc_listings (
     id INTEGER PRIMARY KEY,
@@ -102,7 +116,6 @@ CREATE TABLE IF NOT EXISTS cmc_listings (
 )
 """)
 
-# Gate.io futures
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS gateio_futures_listings (
     symbol TEXT PRIMARY KEY,
@@ -114,7 +127,6 @@ CREATE TABLE IF NOT EXISTS gateio_futures_listings (
 )
 """)
 
-# MEXC futures
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS mexc_futures_listings (
     symbol TEXT PRIMARY KEY,
@@ -126,7 +138,6 @@ CREATE TABLE IF NOT EXISTS mexc_futures_listings (
 )
 """)
 
-# Binance futures
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS binance_futures_listings (
     symbol TEXT PRIMARY KEY,
@@ -152,17 +163,15 @@ binance_ws_lock = asyncio.Lock()
 # =========================
 
 def calculate_ema(closes, period=20):
-    """Exponential Moving Average (simple implementation)"""
     if len(closes) < period:
         return None
     multiplier = 2 / (period + 1)
-    ema = closes[0]  # start with first close
+    ema = closes[0]
     for price in closes[1:]:
         ema = (price - ema) * multiplier + ema
     return ema
 
 def calculate_rsi(closes, period=14):
-    """Relative Strength Index (14 period)"""
     if len(closes) < period + 1:
         return None
     gains = []
@@ -184,7 +193,6 @@ def calculate_rsi(closes, period=14):
     return rsi
 
 def calculate_candle_strength(open_price, close, high, low):
-    """Candle strength = body / range (absolute)"""
     body = abs(close - open_price)
     range_ = high - low
     if range_ == 0:
@@ -192,7 +200,6 @@ def calculate_candle_strength(open_price, close, high, low):
     return body / range_
 
 def calculate_footprint(bids, asks):
-    """Compute bid/ask imbalance ratio from depth snapshots"""
     bid_vol = sum(float(q) for _, q in bids)
     ask_vol = sum(float(q) for _, q in asks)
     total = bid_vol + ask_vol
@@ -201,19 +208,16 @@ def calculate_footprint(bids, asks):
     return (bid_vol - ask_vol) / total
 
 def calculate_cvd(trades):
-    """Cumulative Volume Delta from a list of trade messages"""
     cvd = 0.0
     for trade in trades:
         qty = float(trade.get('q', 0))
-        # m = true if buyer is maker (sell aggressive)
         if not trade.get('m', False):
             cvd += qty
         else:
             cvd -= qty
     return cvd
 
-async def fetch_gateio_klines(symbol, interval=KLINE_INTERVAL, limit=KLINE_LIMIT):
-    """Fetch klines from Gate.io futures"""
+async def fetch_gateio_klines(symbol, interval=TF_GATEIO, limit=KLINE_LIMIT):
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -230,8 +234,7 @@ async def fetch_gateio_klines(symbol, interval=KLINE_INTERVAL, limit=KLINE_LIMIT
         except Exception:
             return None
 
-async def fetch_mexc_klines(symbol, interval=MEXC_KLINE_INTERVAL, limit=KLINE_LIMIT):
-    """Fetch klines from MEXC futures (contract)"""
+async def fetch_mexc_klines(symbol, interval=TF_MEXC, limit=KLINE_LIMIT):
     url = f"https://futures.mexc.com/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -255,8 +258,7 @@ async def fetch_mexc_klines(symbol, interval=MEXC_KLINE_INTERVAL, limit=KLINE_LI
         except Exception:
             return None
 
-async def fetch_binance_klines(symbol, interval=BINANCE_KLINE_INTERVAL, limit=BINANCE_KLINE_LIMIT):
-    """Fetch klines from Binance futures"""
+async def fetch_binance_klines(symbol, interval=TF_BINANCE, limit=BINANCE_KLINE_LIMIT):
     url = f"{BINANCE_FUTURES_KLINES}?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -277,9 +279,7 @@ async def fetch_binance_klines(symbol, interval=BINANCE_KLINE_INTERVAL, limit=BI
 # =========================
 
 async def binance_ws_manager():
-    """Maintain WebSocket connections for all Binance USDT perpetuals"""
     async with aiohttp.ClientSession() as session:
-        # Get exchange info to list all USDT perpetual symbols
         try:
             async with session.get("https://fapi.binance.com/fapi/v1/exchangeInfo") as resp:
                 if resp.status != 200:
@@ -291,13 +291,10 @@ async def binance_ws_manager():
             print(f"Error fetching Binance symbols: {e}")
             return
 
-    # Build combined stream URL for all symbols (depth20@100ms and trade)
     streams = []
     for sym in symbols:
         streams.append(f"{sym.lower()}@depth20@100ms")
         streams.append(f"{sym.lower()}@trade")
-    # Binance combined streams have a limit of ~200 streams per connection.
-    # Split into batches of 150 to be safe.
     batch_size = 150
     for i in range(0, len(streams), batch_size):
         batch = streams[i:i+batch_size]
@@ -305,7 +302,6 @@ async def binance_ws_manager():
         asyncio.create_task(handle_binance_ws_connection(url))
 
 async def handle_binance_ws_connection(url):
-    """Connect to a single combined stream and process messages"""
     while True:
         try:
             async with websockets.connect(url) as ws:
@@ -316,28 +312,23 @@ async def handle_binance_ws_connection(url):
                     result = data.get('data', {})
                     if not stream or not result:
                         continue
-                    # Extract symbol from stream name (e.g., "btcusdt@depth20@100ms")
                     symbol = stream.split('@')[0].upper()
                     async with binance_ws_lock:
                         if symbol not in binance_ws_data:
                             binance_ws_data[symbol] = {'footprint': 0, 'cvd': 0, 'trades': []}
                     if '@depth20' in stream:
-                        # Order book snapshot
                         bids = result.get('b', [])
                         asks = result.get('a', [])
                         fp = calculate_footprint(bids, asks)
                         async with binance_ws_lock:
                             binance_ws_data[symbol]['footprint'] = fp
                     elif '@trade' in stream:
-                        # Trade event (single trade)
                         qty = float(result.get('q', 0))
-                        # m = true if buyer is maker (sell aggressive)
                         if not result.get('m', False):
                             delta = qty
                         else:
                             delta = -qty
                         async with binance_ws_lock:
-                            # Keep a rolling sum for CVD (last 500 trades)
                             trades_list = binance_ws_data[symbol].get('trades', [])
                             trades_list.append({'q': qty, 'm': result.get('m', False)})
                             if len(trades_list) > 500:
@@ -369,7 +360,7 @@ async def send_telegram(message):
         print("Telegram send failed:", e)
 
 # =========================
-# GATE.IO SCANNER (with big coin threshold)
+# GATE.IO SCANNER
 # =========================
 
 async def scan_gateio(first_run=False):
@@ -385,9 +376,7 @@ async def scan_gateio(first_run=False):
             symbol = item["currency_pair"]
             if not symbol.endswith("_USDT"):
                 continue
-            # Determine base asset
             base = symbol.split("_")[0]
-            # Select threshold
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
             else:
@@ -428,6 +417,7 @@ async def scan_gateio(first_run=False):
                 message = (
                     f"🚨 GATE.IO PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
+                    f"⏱ Timeframe: {TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -444,7 +434,7 @@ async def scan_gateio(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC SCANNER (with big coin threshold)
+# MEXC SCANNER
 # =========================
 
 async def scan_mexc(first_run=False):
@@ -460,7 +450,6 @@ async def scan_mexc(first_run=False):
             symbol = item["symbol"]
             if not symbol.endswith("USDT"):
                 continue
-            # Determine base asset (e.g., "BTCUSDT" -> "BTC")
             if symbol.endswith("USDT"):
                 base = symbol[:-4]
             else:
@@ -505,6 +494,7 @@ async def scan_mexc(first_run=False):
                 message = (
                     f"🚨 MEXC PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
+                    f"⏱ Timeframe: {TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -521,7 +511,7 @@ async def scan_mexc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# CMC SCANNER (unchanged – no klines)
+# CMC SCANNER
 # =========================
 
 async def scan_cmc(first_run=False):
@@ -576,6 +566,7 @@ async def scan_cmc(first_run=False):
                 message = (
                     f"🚨 CMC PUMP ALERT\n\n"
                     f"Pair: {coin['symbol']}USDT\n"
+                    f"⏱ Timeframe: {TIMEFRAME}\n"
                     f"Price Change: {cumulative_price_growth:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -593,7 +584,7 @@ async def scan_cmc(first_run=False):
         traceback.print_exc()
 
 # =========================
-# GATE.IO FUTURES SCANNER (with big coin threshold)
+# GATE.IO FUTURES SCANNER
 # =========================
 
 async def scan_gateio_futures(first_run=False):
@@ -657,7 +648,6 @@ async def scan_gateio_futures(first_run=False):
             latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
             candle_bullish = closes[-1] > opens[-1]
             candle_bearish = closes[-1] < opens[-1]
-            # Hybrid RSI logic: crossing OR 4-point move in zone
             if price_change > 0:
                 signal = "Long"
                 ema_confirmed = (ema20 is not None and current_price > ema20)
@@ -701,6 +691,7 @@ async def scan_gateio_futures(first_run=False):
                     message = (
                         f"🚨 GATE.IO FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
+                        f"⏱ Timeframe: {TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -722,7 +713,7 @@ async def scan_gateio_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# MEXC FUTURES SCANNER (with big coin threshold)
+# MEXC FUTURES SCANNER
 # =========================
 
 async def scan_mexc_futures(first_run=False):
@@ -830,6 +821,7 @@ async def scan_mexc_futures(first_run=False):
                     message = (
                         f"🚨 MEXC FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
+                        f"⏱ Timeframe: {TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -851,7 +843,7 @@ async def scan_mexc_futures(first_run=False):
         traceback.print_exc()
 
 # =========================
-# BINANCE FUTURES SCANNER (with reduced thresholds)
+# BINANCE FUTURES SCANNER
 # =========================
 
 async def scan_binance_futures(first_run=False):
@@ -867,7 +859,6 @@ async def scan_binance_futures(first_run=False):
             symbol = item["symbol"]
             if not symbol.endswith("USDT"):
                 continue
-            # Base asset (e.g., "BTCUSDT" -> "BTC")
             base = symbol[:-4]
             if base in BIG_COINS:
                 threshold = BIG_COIN_PRICE_THRESHOLD
@@ -893,7 +884,6 @@ async def scan_binance_futures(first_run=False):
             alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
-            # Trigger conditions using Binance-specific volume spike threshold
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= BINANCE_VOLUME_SPIKE_PERCENT)
             instant_price_spike = abs(price_change) >= threshold
             cumulative_volume_growth = ((volume - baseline_volume) / baseline_volume * 100) if baseline_volume > 0 else 0
@@ -905,7 +895,6 @@ async def scan_binance_futures(first_run=False):
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            # Fetch klines for EMA/RSI/candle
             klines = await fetch_binance_klines(symbol)
             if not klines or len(klines["closes"]) < 14:
                 continue
@@ -953,25 +942,22 @@ async def scan_binance_futures(first_run=False):
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            # Get footprint and CVD from WebSocket data
             async with binance_ws_lock:
                 ws_data = binance_ws_data.get(symbol, {})
                 footprint = ws_data.get('footprint', 0)
                 cvd = ws_data.get('cvd', 0)
-            # Apply footprint and CVD filters with reduced thresholds
             if signal == "Long":
                 if footprint <= BINANCE_FOOTPRINT_THRESHOLD or cvd <= BINANCE_CVD_THRESHOLD:
                     if alerted == 1:
                         cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                         conn.commit()
                     continue
-            else:  # Short
+            else:
                 if footprint >= -BINANCE_FOOTPRINT_THRESHOLD or cvd >= -BINANCE_CVD_THRESHOLD:
                     if alerted == 1:
                         cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                         conn.commit()
                     continue
-            # All conditions met – send alert
             if alerted == 0:
                 cursor.execute(
                     "UPDATE binance_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
@@ -986,6 +972,7 @@ async def scan_binance_futures(first_run=False):
                 message = (
                     f"🚨 BINANCE FUTURES PUMP ALERT\n\n"
                     f"Contract: {symbol}\n"
+                    f"⏱ Timeframe: {TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
@@ -1010,9 +997,8 @@ async def scan_binance_futures(first_run=False):
 
 async def main():
     print("Starting Kachi...")
-    await send_telegram("Sniping 🍁")
+    await send_telegram(f"Sniping 🍁\n⏱ Timeframe: {TIMEFRAME}")
 
-    # Start Binance WebSocket manager in background
     asyncio.create_task(binance_ws_manager())
 
     print("Initializing database silently...")
