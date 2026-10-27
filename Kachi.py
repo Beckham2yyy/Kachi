@@ -104,6 +104,200 @@ def tradingview_url(exchange, raw_symbol):
     return f"https://www.tradingview.com/chart/?symbol={tv_sym}"
 
 # =========================
+# ORDER FLOW HELPERS
+# =========================
+
+def format_cvd(cvd):
+    a = abs(cvd)
+    if a >= 1_000_000:
+        return f"{cvd/1_000_000:+.2f}M"
+    elif a >= 1_000:
+        return f"{cvd/1_000:+.1f}K"
+    elif a >= 10:
+        return f"{cvd:+.2f}"
+    else:
+        return f"{cvd:+.4f}"
+
+def format_footprint(fp):
+    return f"{fp:+.2f}"
+
+def format_of_line(of):
+    return f"📊 OF: FP {format_footprint(of.get('footprint', 0.0))} │ CVD {format_cvd(of.get('cvd', 0.0))}"
+
+async def fetch_gateio_spot_orderflow(symbol):
+    result = {'footprint': 0.0, 'cvd': 0.0}
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"https://api.gateio.ws/api/v4/spot/order_book?currency_pair={symbol}&limit=20"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+                    bid_vol = sum(float(b[1]) for b in bids if len(b) >= 2)
+                    ask_vol = sum(float(a[1]) for a in asks if len(a) >= 2)
+                    total = bid_vol + ask_vol
+                    if total > 0:
+                        result['footprint'] = (bid_vol - ask_vol) / total
+        except Exception:
+            pass
+        try:
+            url = f"https://api.gateio.ws/api/v4/spot/trades?currency_pair={symbol}&limit=100"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    cvd = 0.0
+                    for t in trades:
+                        amt = float(t.get('amount', 0))
+                        side = (t.get('side') or '').lower()
+                        if side == 'buy':
+                            cvd += amt
+                        elif side == 'sell':
+                            cvd -= amt
+                    result['cvd'] = cvd
+        except Exception:
+            pass
+    return result
+
+async def fetch_gateio_fut_orderflow(symbol):
+    result = {'footprint': 0.0, 'cvd': 0.0}
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"https://api.gateio.ws/api/v4/futures/usdt/order_book?contract={symbol}&limit=20"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+                    bid_vol = sum(abs(float(b[1])) for b in bids if len(b) >= 2)
+                    ask_vol = sum(abs(float(a[1])) for a in asks if len(a) >= 2)
+                    total = bid_vol + ask_vol
+                    if total > 0:
+                        result['footprint'] = (bid_vol - ask_vol) / total
+        except Exception:
+            pass
+        try:
+            url = f"https://api.gateio.ws/api/v4/futures/usdt/trades?contract={symbol}&limit=100"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    cvd = 0.0
+                    for t in trades:
+                        size = float(t.get('size', 0))
+                        cvd += size
+                    result['cvd'] = cvd
+        except Exception:
+            pass
+    return result
+
+async def fetch_mexc_spot_orderflow(symbol):
+    result = {'footprint': 0.0, 'cvd': 0.0}
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"https://api.mexc.com/api/v3/depth?symbol={symbol}&limit=20"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+                    bid_vol = sum(float(b[1]) for b in bids if len(b) >= 2)
+                    ask_vol = sum(float(a[1]) for a in asks if len(a) >= 2)
+                    total = bid_vol + ask_vol
+                    if total > 0:
+                        result['footprint'] = (bid_vol - ask_vol) / total
+        except Exception:
+            pass
+        try:
+            url = f"https://api.mexc.com/api/v3/trades?symbol={symbol}&limit=100"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    cvd = 0.0
+                    for t in trades:
+                        qty = float(t.get('qty', 0))
+                        if t.get('isBuyerMaker', True):
+                            cvd -= qty
+                        else:
+                            cvd += qty
+                    result['cvd'] = cvd
+        except Exception:
+            pass
+    return result
+
+async def fetch_mexc_fut_orderflow(symbol):
+    result = {'footprint': 0.0, 'cvd': 0.0}
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"https://contract.mexc.com/api/v1/contract/depth/{symbol}?limit=20"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    if book.get('success'):
+                        data = book.get('data', {})
+                        bids = data.get('bids', [])
+                        asks = data.get('asks', [])
+                        bid_vol = sum(abs(float(b[1])) for b in bids if len(b) >= 2)
+                        ask_vol = sum(abs(float(a[1])) for a in asks if len(a) >= 2)
+                        total = bid_vol + ask_vol
+                        if total > 0:
+                            result['footprint'] = (bid_vol - ask_vol) / total
+        except Exception:
+            pass
+        try:
+            url = f"https://contract.mexc.com/api/v1/contract/deals/{symbol}?limit=100"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get('success'):
+                        trades = data.get('data', [])
+                        cvd = 0.0
+                        for t in trades:
+                            vol = float(t.get('v', 0))
+                            side = int(t.get('T', 0))
+                            if side == 1:
+                                cvd -= vol
+                            elif side == 2:
+                                cvd += vol
+                        result['cvd'] = cvd
+        except Exception:
+            pass
+    return result
+
+async def fetch_binance_fut_orderflow(symbol):
+    result = {'footprint': 0.0, 'cvd': 0.0}
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=20"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+                    bid_vol = sum(float(b[1]) for b in bids if len(b) >= 2)
+                    ask_vol = sum(float(a[1]) for a in asks if len(a) >= 2)
+                    total = bid_vol + ask_vol
+                    if total > 0:
+                        result['footprint'] = (bid_vol - ask_vol) / total
+        except Exception:
+            pass
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/trades?symbol={symbol}&limit=500"
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    cvd = 0.0
+                    for t in trades:
+                        qty = float(t.get('qty', 0))
+                        if t.get('isBuyerMaker', True):
+                            cvd -= qty
+                        else:
+                            cvd += qty
+                    result['cvd'] = cvd
+        except Exception:
+            pass
+    return result
+
+# =========================
 # DATABASE
 # =========================
 
@@ -553,6 +747,8 @@ async def scan_gateio(first_run=False):
                     (volume, current_price, now, symbol)
                 )
                 conn.commit()
+                of = await fetch_gateio_spot_orderflow(symbol)
+                of_line = format_of_line(of)
                 message = (
                     f"🚨 GATE.IO PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
@@ -560,7 +756,8 @@ async def scan_gateio(first_run=False):
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider {signal}\n\n"
+                    f"Entry Signal: Consider {signal}\n"
+                    f"{of_line}\n\n"
                     f"========================"
                 )
                 await send_telegram(message, tradingview_url("gateio_spot", symbol))
@@ -623,6 +820,8 @@ async def scan_mexc(first_run=False):
                     (volume, current_price, now, symbol)
                 )
                 conn.commit()
+                of = await fetch_mexc_spot_orderflow(symbol)
+                of_line = format_of_line(of)
                 message = (
                     f"🚨 MEXC PUMP ALERT\n\n"
                     f"Pair: {symbol}\n"
@@ -630,7 +829,8 @@ async def scan_mexc(first_run=False):
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider {signal}\n\n"
+                    f"Entry Signal: Consider {signal}\n"
+                    f"{of_line}\n\n"
                     f"========================"
                 )
                 await send_telegram(message, tradingview_url("mexc_spot", symbol))
@@ -694,6 +894,8 @@ async def scan_cmc(first_run=False):
                 )
                 conn.commit()
                 chart_link = f"https://coinmarketcap.com/currencies/{slug}/"
+                of = await fetch_binance_fut_orderflow(f"{coin['symbol']}USDT")
+                of_line = format_of_line(of)
                 message = (
                     f"🚨 CMC PUMP ALERT\n\n"
                     f"Pair: {coin['symbol']}USDT\n"
@@ -701,7 +903,8 @@ async def scan_cmc(first_run=False):
                     f"Price Change: {cumulative_price_growth:+.2f}%\n"
                     f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider {signal}\n\n"
+                    f"Entry Signal: Consider {signal}\n"
+                    f"{of_line}\n\n"
                     f"Chart:\n{chart_link}\n\n"
                     f"========================"
                 )
@@ -815,6 +1018,8 @@ async def scan_gateio_futures(first_run=False):
                     ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
                     rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
                     strength_str = f"{latest_strength:.2f}"
+                    of = await fetch_gateio_fut_orderflow(symbol)
+                    of_line = format_of_line(of)
                     message = (
                         f"🚨 GATE.IO FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
@@ -826,7 +1031,8 @@ async def scan_gateio_futures(first_run=False):
                         f"Confirmations: {confirmations}/3\n"
                         f"EMA20: {ema_str}\n"
                         f"RSI: {rsi_str}\n"
-                        f"Candle Strength: {strength_str}\n\n"
+                        f"Candle Strength: {strength_str}\n"
+                        f"{of_line}\n\n"
                         f"========================"
                     )
                     await send_telegram(message, tradingview_url("gateio_fut", symbol))
@@ -941,6 +1147,8 @@ async def scan_mexc_futures(first_run=False):
                     ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
                     rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
                     strength_str = f"{latest_strength:.2f}"
+                    of = await fetch_mexc_fut_orderflow(symbol)
+                    of_line = format_of_line(of)
                     message = (
                         f"🚨 MEXC FUTURES PUMP ALERT\n\n"
                         f"Contract: {symbol}\n"
@@ -952,7 +1160,8 @@ async def scan_mexc_futures(first_run=False):
                         f"Confirmations: {confirmations}/3\n"
                         f"EMA20: {ema_str}\n"
                         f"RSI: {rsi_str}\n"
-                        f"Candle Strength: {strength_str}\n\n"
+                        f"Candle Strength: {strength_str}\n"
+                        f"{of_line}\n\n"
                         f"========================"
                     )
                     await send_telegram(message, tradingview_url("mexc_fut", symbol))
@@ -1086,8 +1295,11 @@ async def scan_binance_futures(first_run=False):
                 ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
                 rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
                 strength_str = f"{latest_strength:.2f}"
-                footprint_str = f"{footprint:.2f}"
-                cvd_str = f"{cvd:.2f}"
+                if footprint == 0 and cvd == 0:
+                    of = await fetch_binance_fut_orderflow(symbol)
+                else:
+                    of = {'footprint': footprint, 'cvd': cvd}
+                of_line = format_of_line(of)
                 message = (
                     f"🚨 BINANCE FUTURES PUMP ALERT\n\n"
                     f"Contract: {symbol}\n"
@@ -1100,8 +1312,7 @@ async def scan_binance_futures(first_run=False):
                     f"EMA20: {ema_str}\n"
                     f"RSI: {rsi_str}\n"
                     f"Candle Strength: {strength_str}\n"
-                    f"Footprint (Bid/Ask Imbalance): {footprint_str}\n"
-                    f"CVD (Net Buying Volume): {cvd_str}\n\n"
+                    f"{of_line}\n\n"
                     f"========================"
                 )
                 await send_telegram(message, tradingview_url("binance_fut", symbol))
