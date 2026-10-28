@@ -52,8 +52,6 @@ BINANCE_CVD_THRESHOLD = 20000
 BINANCE_PRICE_CHANGE_THRESHOLD = 1.5
 BINANCE_VOLUME_SPIKE_PERCENT = 12
 
-RSI_POINTS_THRESHOLD = 4
-
 BIG_COINS = ["BTC", "ETH", "SOL"]
 BIG_COIN_PRICE_THRESHOLD = 2
 
@@ -122,10 +120,46 @@ def format_footprint(fp):
     return f"{fp:+.2f}"
 
 def format_of_line(of):
-    return f"📊 OF: FP {format_footprint(of.get('footprint', 0.0))} │ CVD {format_cvd(of.get('cvd', 0.0))}"
+    fp = of.get('footprint', 0.0)
+    cvd = of.get('cvd', 0.0)
+    mb = of.get('max_bid', 0.0)
+    ma = of.get('max_ask', 0.0)
+    return f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)} │ Walls: B {mb:.1f} / A {ma:.1f}"
+
+def calculate_vwap(highs, lows, closes, volumes):
+    if not volumes or len(volumes) != len(closes) or sum(volumes) == 0:
+        return None
+    typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+    return sum(tp * v for tp, v in zip(typical_prices, volumes)) / sum(volumes)
+
+def calculate_poc(highs, lows, closes, volumes):
+    if not volumes or len(volumes) != len(closes):
+        return None
+    max_vol = -1
+    poc = None
+    for h, l, c, v in zip(highs, lows, closes, volumes):
+        if v > max_vol:
+            max_vol = v
+            poc = (h + l + c) / 3
+    return poc
+
+def calculate_walls(bids, asks):
+    max_bid = 0.0
+    max_ask = 0.0
+    for b in bids:
+        if len(b) >= 2:
+            size = abs(float(b[1]))
+            if size > max_bid:
+                max_bid = size
+    for a in asks:
+        if len(a) >= 2:
+            size = abs(float(a[1]))
+            if size > max_ask:
+                max_ask = size
+    return max_bid, max_ask
 
 async def fetch_gateio_spot_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.gateio.ws/api/v4/spot/order_book?currency_pair={symbol}&limit=20"
@@ -139,6 +173,7 @@ async def fetch_gateio_spot_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
+                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -160,7 +195,7 @@ async def fetch_gateio_spot_orderflow(symbol):
     return result
 
 async def fetch_gateio_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.gateio.ws/api/v4/futures/usdt/order_book?contract={symbol}&limit=20"
@@ -174,6 +209,7 @@ async def fetch_gateio_fut_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
+                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -191,7 +227,7 @@ async def fetch_gateio_fut_orderflow(symbol):
     return result
 
 async def fetch_mexc_spot_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.mexc.com/api/v3/depth?symbol={symbol}&limit=20"
@@ -205,6 +241,7 @@ async def fetch_mexc_spot_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
+                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -225,7 +262,7 @@ async def fetch_mexc_spot_orderflow(symbol):
     return result
 
 async def fetch_mexc_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://contract.mexc.com/api/v1/contract/depth/{symbol}?limit=20"
@@ -241,6 +278,7 @@ async def fetch_mexc_fut_orderflow(symbol):
                         total = bid_vol + ask_vol
                         if total > 0:
                             result['footprint'] = (bid_vol - ask_vol) / total
+                        result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -264,7 +302,7 @@ async def fetch_mexc_fut_orderflow(symbol):
     return result
 
 async def fetch_binance_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=20"
@@ -278,6 +316,7 @@ async def fetch_binance_fut_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
+                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -310,8 +349,7 @@ CREATE TABLE IF NOT EXISTS gateio_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -321,8 +359,7 @@ CREATE TABLE IF NOT EXISTS mexc_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -332,8 +369,7 @@ CREATE TABLE IF NOT EXISTS cmc_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -343,8 +379,7 @@ CREATE TABLE IF NOT EXISTS gateio_futures_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -354,8 +389,7 @@ CREATE TABLE IF NOT EXISTS mexc_futures_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -365,8 +399,7 @@ CREATE TABLE IF NOT EXISTS binance_futures_listings (
     alerted INTEGER DEFAULT 0,
     baseline_volume REAL DEFAULT 0,
     baseline_price REAL DEFAULT 0,
-    last_alert INTEGER DEFAULT 0,
-    prev_rsi REAL DEFAULT 0
+    last_alert INTEGER DEFAULT 0
 )
 """)
 
@@ -382,35 +415,6 @@ binance_ws_lock = asyncio.Lock()
 # =========================
 # HELPER FUNCTIONS (Indicators)
 # =========================
-
-def calculate_ema(closes, period=20):
-    if len(closes) < period:
-        return None
-    multiplier = 2 / (period + 1)
-    ema = closes[0]
-    for price in closes[1:]:
-        ema = (price - ema) * multiplier + ema
-    return ema
-
-def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return None
-    gains = []
-    losses = []
-    for i in range(1, period + 1):
-        change = closes[i] - closes[i-1]
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
 
 def calculate_candle_strength(open_price, close, high, low):
     body = abs(close - open_price)
@@ -452,7 +456,8 @@ async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 opens = [float(c[1]) for c in data]
                 highs = [float(c[3]) for c in data]
                 lows = [float(c[4]) for c in data]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows}
+                volumes = [float(c[6]) for c in data]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
         except Exception:
             return None
 
@@ -472,13 +477,14 @@ async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 times = klines.get("time", [])
                 if not times:
                     return None
-                combined = list(zip(times, klines["open"], klines["close"], klines["high"], klines["low"]))
+                combined = list(zip(times, klines["open"], klines["close"], klines["high"], klines["low"], klines["vol"]))
                 combined.sort(key=lambda x: x[0])
-                opens = [float(o) for _, o, _, _, _ in combined]
-                closes = [float(c) for _, _, c, _, _ in combined]
-                highs = [float(h) for _, _, _, h, _ in combined]
-                lows = [float(l) for _, _, _, _, l in combined]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows}
+                opens = [float(o) for _, o, _, _, _, _ in combined]
+                closes = [float(c) for _, _, c, _, _, _ in combined]
+                highs = [float(h) for _, _, _, h, _, _ in combined]
+                lows = [float(l) for _, _, _, _, l, _ in combined]
+                volumes = [float(v) for _, _, _, _, _, v in combined]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
         except Exception:
             return None
 
@@ -496,7 +502,8 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
                 highs = [float(c[2]) for c in data]
                 lows = [float(c[3]) for c in data]
                 closes = [float(c[4]) for c in data]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows}
+                volumes = [float(c[5]) for c in data]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
         except Exception:
             return None
 
@@ -719,7 +726,7 @@ async def scan_gateio(first_run=False):
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= GATEIO_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM gateio_listings WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM gateio_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -731,7 +738,7 @@ async def scan_gateio(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
@@ -792,7 +799,7 @@ async def scan_mexc(first_run=False):
             price_change = float(item.get("priceChangePercent", 0)) * 100
             meets_threshold = volume >= MEXC_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM mexc_listings WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM mexc_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -804,7 +811,7 @@ async def scan_mexc(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
@@ -865,7 +872,7 @@ async def scan_cmc(first_run=False):
             slug = coin.get("slug")
             meets_threshold = marketcap >= CMC_MIN_MARKETCAP and volume >= CMC_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM cmc_listings WHERE id=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM cmc_listings WHERE id=?",
                 (coin_id,)
             )
             row = cursor.fetchone()
@@ -877,7 +884,7 @@ async def scan_cmc(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
@@ -940,7 +947,7 @@ async def scan_gateio_futures(first_run=False):
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM gateio_futures_listings WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM gateio_futures_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -952,7 +959,7 @@ async def scan_gateio_futures(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
@@ -973,41 +980,30 @@ async def scan_gateio_futures(first_run=False):
             opens = klines["opens"]
             highs = klines["highs"]
             lows = klines["lows"]
-            ema20 = calculate_ema(closes, period=20)
-            rsi = calculate_rsi(closes, period=14)
+            volumes = klines["volumes"]
+            
+            vwap = calculate_vwap(highs, lows, closes, volumes)
+            poc = calculate_poc(highs, lows, closes, volumes)
             latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
             candle_bullish = closes[-1] > opens[-1]
             candle_bearish = closes[-1] < opens[-1]
+            
+            of = await fetch_gateio_fut_orderflow(symbol)
+            footprint = of.get('footprint', 0.0)
+            
             if price_change > 0:
                 signal = "Long"
-                ema_confirmed = (ema20 is not None and current_price > ema20)
-                if rsi is not None:
-                    if prev_rsi < 55 and rsi >= 55 and rsi > prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi >= 55 and rsi >= 55 and (rsi - prev_rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price > vwap)
+                of_confirmed = (footprint > 0)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
             else:
                 signal = "Short"
-                ema_confirmed = (ema20 is not None and current_price < ema20)
-                if rsi is not None:
-                    if prev_rsi > 45 and rsi <= 45 and rsi < prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi <= 45 and rsi <= 45 and (prev_rsi - rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price < vwap)
+                of_confirmed = (footprint < 0)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-            confirmations = sum([ema_confirmed, rsi_confirmed, candle_confirmed])
-            if rsi is not None:
-                cursor.execute("UPDATE gateio_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
-                conn.commit()
+                
+            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
+            
             if confirmations >= 2:
                 if alerted == 0:
                     cursor.execute(
@@ -1015,10 +1011,9 @@ async def scan_gateio_futures(first_run=False):
                         (volume, current_price, now, symbol)
                     )
                     conn.commit()
-                    ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
-                    rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+                    vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
+                    poc_str = f"{poc:.4f}" if poc is not None else "N/A"
                     strength_str = f"{latest_strength:.2f}"
-                    of = await fetch_gateio_fut_orderflow(symbol)
                     of_line = format_of_line(of)
                     message = (
                         f"🚨 GATE.IO FUTURES PUMP ALERT\n\n"
@@ -1029,8 +1024,8 @@ async def scan_gateio_futures(first_run=False):
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
                         f"Confirmations: {confirmations}/3\n"
-                        f"EMA20: {ema_str}\n"
-                        f"RSI: {rsi_str}\n"
+                        f"VWAP: {vwap_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
                         f"Candle Strength: {strength_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
@@ -1069,7 +1064,7 @@ async def scan_mexc_futures(first_run=False):
             price_change = float(item.get("riseFallRate", 0)) * 100
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM mexc_futures_listings WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM mexc_futures_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -1081,7 +1076,7 @@ async def scan_mexc_futures(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= VOLUME_SPIKE_PERCENT)
@@ -1102,41 +1097,30 @@ async def scan_mexc_futures(first_run=False):
             opens = klines["opens"]
             highs = klines["highs"]
             lows = klines["lows"]
-            ema20 = calculate_ema(closes, period=20)
-            rsi = calculate_rsi(closes, period=14)
+            volumes = klines["volumes"]
+            
+            vwap = calculate_vwap(highs, lows, closes, volumes)
+            poc = calculate_poc(highs, lows, closes, volumes)
             latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
             candle_bullish = closes[-1] > opens[-1]
             candle_bearish = closes[-1] < opens[-1]
+            
+            of = await fetch_mexc_fut_orderflow(symbol)
+            footprint = of.get('footprint', 0.0)
+            
             if price_change > 0:
                 signal = "Long"
-                ema_confirmed = (ema20 is not None and current_price > ema20)
-                if rsi is not None:
-                    if prev_rsi < 55 and rsi >= 55 and rsi > prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi >= 55 and rsi >= 55 and (rsi - prev_rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price > vwap)
+                of_confirmed = (footprint > 0)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
             else:
                 signal = "Short"
-                ema_confirmed = (ema20 is not None and current_price < ema20)
-                if rsi is not None:
-                    if prev_rsi > 45 and rsi <= 45 and rsi < prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi <= 45 and rsi <= 45 and (prev_rsi - rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price < vwap)
+                of_confirmed = (footprint < 0)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-            confirmations = sum([ema_confirmed, rsi_confirmed, candle_confirmed])
-            if rsi is not None:
-                cursor.execute("UPDATE mexc_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
-                conn.commit()
+                
+            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
+            
             if confirmations >= 2:
                 if alerted == 0:
                     cursor.execute(
@@ -1144,10 +1128,9 @@ async def scan_mexc_futures(first_run=False):
                         (volume, current_price, now, symbol)
                     )
                     conn.commit()
-                    ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
-                    rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+                    vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
+                    poc_str = f"{poc:.4f}" if poc is not None else "N/A"
                     strength_str = f"{latest_strength:.2f}"
-                    of = await fetch_mexc_fut_orderflow(symbol)
                     of_line = format_of_line(of)
                     message = (
                         f"🚨 MEXC FUTURES PUMP ALERT\n\n"
@@ -1158,8 +1141,8 @@ async def scan_mexc_futures(first_run=False):
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
                         f"Confirmations: {confirmations}/3\n"
-                        f"EMA20: {ema_str}\n"
-                        f"RSI: {rsi_str}\n"
+                        f"VWAP: {vwap_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
                         f"Candle Strength: {strength_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
@@ -1197,7 +1180,7 @@ async def scan_binance_futures(first_run=False):
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             cursor.execute(
-                "SELECT alerted, baseline_volume, baseline_price, last_alert, prev_rsi FROM binance_futures_listings WHERE symbol=?",
+                "SELECT alerted, baseline_volume, baseline_price, last_alert FROM binance_futures_listings WHERE symbol=?",
                 (symbol,)
             )
             row = cursor.fetchone()
@@ -1209,7 +1192,7 @@ async def scan_binance_futures(first_run=False):
                 )
                 conn.commit()
                 continue
-            alerted, baseline_volume, baseline_price, last_alert, prev_rsi = row
+            alerted, baseline_volume, baseline_price, last_alert = row
             if last_alert and (now - last_alert) < COOLDOWN:
                 continue
             instant_volume_spike = (baseline_volume > 0) and ((volume - baseline_volume) / baseline_volume * 100 >= BINANCE_VOLUME_SPIKE_PERCENT)
@@ -1230,75 +1213,46 @@ async def scan_binance_futures(first_run=False):
             opens = klines["opens"]
             highs = klines["highs"]
             lows = klines["lows"]
-            ema20 = calculate_ema(closes, period=20)
-            rsi = calculate_rsi(closes, period=14)
+            volumes = klines["volumes"]
+            
+            vwap = calculate_vwap(highs, lows, closes, volumes)
+            poc = calculate_poc(highs, lows, closes, volumes)
             latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
             candle_bullish = closes[-1] > opens[-1]
             candle_bearish = closes[-1] < opens[-1]
+            
+            of = await fetch_binance_fut_orderflow(symbol)
+            footprint = of.get('footprint', 0.0)
+            cvd = of.get('cvd', 0.0)
+
             if price_change > 0:
                 signal = "Long"
-                ema_confirmed = (ema20 is not None and current_price > ema20)
-                if rsi is not None:
-                    if prev_rsi < 55 and rsi >= 55 and rsi > prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi >= 55 and rsi >= 55 and (rsi - prev_rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price > vwap)
+                of_confirmed = (footprint > BINANCE_FOOTPRINT_THRESHOLD and cvd > BINANCE_CVD_THRESHOLD)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
             else:
                 signal = "Short"
-                ema_confirmed = (ema20 is not None and current_price < ema20)
-                if rsi is not None:
-                    if prev_rsi > 45 and rsi <= 45 and rsi < prev_rsi:
-                        rsi_confirmed = True
-                    elif prev_rsi <= 45 and rsi <= 45 and (prev_rsi - rsi) >= RSI_POINTS_THRESHOLD:
-                        rsi_confirmed = True
-                    else:
-                        rsi_confirmed = False
-                else:
-                    rsi_confirmed = False
+                vwap_confirmed = (vwap is not None and current_price < vwap)
+                of_confirmed = (footprint < -BINANCE_FOOTPRINT_THRESHOLD and cvd < -BINANCE_CVD_THRESHOLD)
                 candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-            confirmations = sum([ema_confirmed, rsi_confirmed, candle_confirmed])
-            if rsi is not None:
-                cursor.execute("UPDATE binance_futures_listings SET prev_rsi=? WHERE symbol=?", (rsi, symbol))
-                conn.commit()
+                
+            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
+            
             if confirmations < 3:
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            async with binance_ws_lock:
-                ws_data = binance_ws_data.get(symbol, {})
-                footprint = ws_data.get('footprint', 0)
-                cvd = ws_data.get('cvd', 0)
-            if signal == "Long":
-                if footprint <= BINANCE_FOOTPRINT_THRESHOLD or cvd <= BINANCE_CVD_THRESHOLD:
-                    if alerted == 1:
-                        cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
-                        conn.commit()
-                    continue
-            else:
-                if footprint >= -BINANCE_FOOTPRINT_THRESHOLD or cvd >= -BINANCE_CVD_THRESHOLD:
-                    if alerted == 1:
-                        cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
-                        conn.commit()
-                    continue
+                
             if alerted == 0:
                 cursor.execute(
                     "UPDATE binance_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
                     (volume, current_price, now, symbol)
                 )
                 conn.commit()
-                ema_str = f"{ema20:.2f}" if ema20 is not None else "N/A"
-                rsi_str = f"{rsi:.2f}" if rsi is not None else "N/A"
+                vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
+                poc_str = f"{poc:.4f}" if poc is not None else "N/A"
                 strength_str = f"{latest_strength:.2f}"
-                if footprint == 0 and cvd == 0:
-                    of = await fetch_binance_fut_orderflow(symbol)
-                else:
-                    of = {'footprint': footprint, 'cvd': cvd}
                 of_line = format_of_line(of)
                 message = (
                     f"🚨 BINANCE FUTURES PUMP ALERT\n\n"
@@ -1309,8 +1263,8 @@ async def scan_binance_futures(first_run=False):
                     f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n"
                     f"Confirmations: {confirmations}/3\n"
-                    f"EMA20: {ema_str}\n"
-                    f"RSI: {rsi_str}\n"
+                    f"VWAP: {vwap_str}\n"
+                    f"POC (Vol Profile): {poc_str}\n"
                     f"Candle Strength: {strength_str}\n"
                     f"{of_line}\n\n"
                     f"========================"
