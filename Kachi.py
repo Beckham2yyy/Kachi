@@ -102,7 +102,7 @@ def tradingview_url(exchange, raw_symbol):
     return f"https://www.tradingview.com/chart/?symbol={tv_sym}"
 
 # =========================
-# ORDER FLOW HELPERS
+# ORDER FLOW & OWFAH HELPERS
 # =========================
 
 def format_cvd(cvd):
@@ -119,12 +119,17 @@ def format_cvd(cvd):
 def format_footprint(fp):
     return f"{fp:+.2f}"
 
-def format_of_line(of):
+def format_of_line(of, owfah=None):
     fp = of.get('footprint', 0.0)
     cvd = of.get('cvd', 0.0)
     mb = of.get('max_bid', 0.0)
     ma = of.get('max_ask', 0.0)
-    return f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)} │ Walls: B {mb:.1f} / A {ma:.1f}"
+    base_str = f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)} │ Walls: B {mb:.1f} / A {ma:.1f}"
+    if owfah:
+        base_str += f" │ MaxD {format_cvd(owfah['max_delta'])} │ MinD {format_cvd(owfah['min_delta'])}"
+        if owfah['signal']:
+            base_str += f"\n🔥 OWFAH: {owfah['signal']} TRIGGERED"
+    return base_str
 
 def calculate_vwap(highs, lows, closes, volumes):
     if not volumes or len(volumes) != len(closes) or sum(volumes) == 0:
@@ -157,6 +162,39 @@ def calculate_walls(bids, asks):
             if size > max_ask:
                 max_ask = size
     return max_bid, max_ask
+
+def calculate_owfah(deltas, volumes, footprint):
+    if len(deltas) < 2 or len(volumes) < 2:
+        return {'signal': None, 'max_delta': 0.0, 'min_delta': 0.0}
+    
+    max_delta = max(deltas)
+    min_delta = min(deltas)
+    prev_delta = deltas[-2]
+    prev_vol = volumes[-2]
+    curr_delta = deltas[-1]
+    avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
+    
+    # Check if previous candle had a delta volume spike > 11%
+    prev_spike = (abs(prev_delta) / prev_vol) > 0.11 if prev_vol > 0 else False
+    
+    # LONG: Max delta aligns with footprint, min delta is small (10-0)
+    long_signal = (
+        footprint > 0 and
+        prev_spike and
+        curr_delta == max_delta and
+        (min_delta / avg_vol) < 0.1
+    )
+    
+    # SHORT: Min delta aligns with footprint, max delta is small (10-0)
+    short_signal = (
+        footprint < 0 and
+        prev_spike and
+        curr_delta == min_delta and
+        (max_delta / avg_vol) > -0.1
+    )
+    
+    signal = "LONG" if long_signal else ("SHORT" if short_signal else None)
+    return {'signal': signal, 'max_delta': max_delta, 'min_delta': min_delta}
 
 async def fetch_gateio_spot_orderflow(symbol):
     result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
@@ -443,7 +481,7 @@ def calculate_cvd(trades):
 
 async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
     if interval is None:
-        interval = get_tf_gateio()
+        interval = "15m"
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -457,13 +495,15 @@ async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 highs = [float(c[3]) for c in data]
                 lows = [float(c[4]) for c in data]
                 volumes = [float(c[6]) for c in data]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
+                # Gate.io doesn't have taker buy in standard klines, so we proxy delta
+                deltas = [v if c > o else -v for o, c, v in zip(opens, closes, volumes)]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
             return None
 
 async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
     if interval is None:
-        interval = get_tf_mexc()
+        interval = "Min15"
     url = f"https://futures.mexc.com/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -484,13 +524,15 @@ async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 highs = [float(h) for _, _, _, h, _, _ in combined]
                 lows = [float(l) for _, _, _, _, l, _ in combined]
                 volumes = [float(v) for _, _, _, _, _, v in combined]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
+                # MEXC doesn't have taker buy in standard klines, proxy delta
+                deltas = [v if c > o else -v for o, c, v in zip(opens, closes, volumes)]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
             return None
 
 async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT):
     if interval is None:
-        interval = get_tf_binance()
+        interval = "15m"
     url = f"{BINANCE_FUTURES_KLINES}?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -503,7 +545,9 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
                 lows = [float(c[3]) for c in data]
                 closes = [float(c[4]) for c in data]
                 volumes = [float(c[5]) for c in data]
-                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes}
+                # Binance provides taker buy base asset volume at index 9
+                deltas = [(2 * float(c[9])) - float(c[5]) for c in data]
+                return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
             return None
 
@@ -644,6 +688,32 @@ async def handle_message(session, message):
     text = (message.get("text") or "").strip()
     if text.startswith("/timeframe") or text.startswith("/start"):
         await send_timeframe_picker(session, chat_id)
+    elif text.startswith("/watchlist"):
+        try:
+            cursor.execute("SELECT symbol, last_alert FROM binance_futures_listings WHERE alerted=1 ORDER BY last_alert DESC LIMIT 5")
+            binance_list = cursor.fetchall()
+            cursor.execute("SELECT symbol, last_alert FROM gateio_futures_listings WHERE alerted=1 ORDER BY last_alert DESC LIMIT 5")
+            gate_list = cursor.fetchall()
+            
+            msg = "👀 **Active Watchlist (Recent Alerts)**\n\n"
+            if binance_list or gate_list:
+                if binance_list:
+                    msg += "Binance:\n"
+                    for sym, ts in binance_list:
+                        msg += f"• {sym} ({int((time.time()-ts)/60)}m ago)\n"
+                if gate_list:
+                    msg += "\nGate.io:\n"
+                    for sym, ts in gate_list:
+                        msg += f"• {sym} ({int((time.time()-ts)/60)}m ago)\n"
+            else:
+                msg += "No active alerts right now."
+                
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {"chat_id": chat_id, "text": msg}
+            async with session.post(url, json=payload):
+                pass
+        except Exception as e:
+            print(f"Watchlist error: {e}")
 
 async def handle_callback(session, callback):
     global CURRENT_TIMEFRAME
@@ -973,60 +1043,44 @@ async def scan_gateio_futures(first_run=False):
                     cursor.execute("UPDATE gateio_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            klines = await fetch_gateio_klines(symbol)
+            
+            # Fetch 15m klines specifically for OWFAH sequence logic
+            klines = await fetch_gateio_klines(symbol, interval="15m")
             if not klines or len(klines["closes"]) < 14:
                 continue
-            closes = klines["closes"]
-            opens = klines["opens"]
-            highs = klines["highs"]
-            lows = klines["lows"]
-            volumes = klines["volumes"]
-            
-            vwap = calculate_vwap(highs, lows, closes, volumes)
-            poc = calculate_poc(highs, lows, closes, volumes)
-            latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
-            candle_bullish = closes[-1] > opens[-1]
-            candle_bearish = closes[-1] < opens[-1]
+                
+            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = calculate_poc(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_gateio_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
             
-            if price_change > 0:
-                signal = "Long"
-                vwap_confirmed = (vwap is not None and current_price > vwap)
-                of_confirmed = (footprint > 0)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
-            else:
-                signal = "Short"
-                vwap_confirmed = (vwap is not None and current_price < vwap)
-                of_confirmed = (footprint < 0)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-                
-            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
+            owfah = calculate_owfah(klines["deltas"], klines["volumes"], footprint)
             
-            if confirmations >= 2:
+            # OWFAH Sequence Trigger
+            if owfah['signal'] is not None:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE gateio_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
                         (volume, current_price, now, symbol)
                     )
                     conn.commit()
+                    
+                    signal = owfah['signal'].capitalize()
                     vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
                     poc_str = f"{poc:.4f}" if poc is not None else "N/A"
-                    strength_str = f"{latest_strength:.2f}"
-                    of_line = format_of_line(of)
+                    of_line = format_of_line(of, owfah)
+                    
                     message = (
-                        f"🚨 GATE.IO FUTURES PUMP ALERT\n\n"
+                        f"🚨 GATE.IO FUTURES OWFAH ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
+                        f"⏱ Timeframe: 15m\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
-                        f"Confirmations: {confirmations}/3\n"
                         f"VWAP: {vwap_str}\n"
                         f"POC (Vol Profile): {poc_str}\n"
-                        f"Candle Strength: {strength_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
                     )
@@ -1090,60 +1144,43 @@ async def scan_mexc_futures(first_run=False):
                     cursor.execute("UPDATE mexc_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            klines = await fetch_mexc_klines(symbol)
+                
+            # Fetch 15m klines for OWFAH
+            klines = await fetch_mexc_klines(symbol, interval="Min15")
             if not klines or len(klines["closes"]) < 14:
                 continue
-            closes = klines["closes"]
-            opens = klines["opens"]
-            highs = klines["highs"]
-            lows = klines["lows"]
-            volumes = klines["volumes"]
-            
-            vwap = calculate_vwap(highs, lows, closes, volumes)
-            poc = calculate_poc(highs, lows, closes, volumes)
-            latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
-            candle_bullish = closes[-1] > opens[-1]
-            candle_bearish = closes[-1] < opens[-1]
+                
+            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = calculate_poc(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_mexc_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
             
-            if price_change > 0:
-                signal = "Long"
-                vwap_confirmed = (vwap is not None and current_price > vwap)
-                of_confirmed = (footprint > 0)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
-            else:
-                signal = "Short"
-                vwap_confirmed = (vwap is not None and current_price < vwap)
-                of_confirmed = (footprint < 0)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-                
-            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
+            owfah = calculate_owfah(klines["deltas"], klines["volumes"], footprint)
             
-            if confirmations >= 2:
+            if owfah['signal'] is not None:
                 if alerted == 0:
                     cursor.execute(
                         "UPDATE mexc_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
                         (volume, current_price, now, symbol)
                     )
                     conn.commit()
+                    
+                    signal = owfah['signal'].capitalize()
                     vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
                     poc_str = f"{poc:.4f}" if poc is not None else "N/A"
-                    strength_str = f"{latest_strength:.2f}"
-                    of_line = format_of_line(of)
+                    of_line = format_of_line(of, owfah)
+                    
                     message = (
-                        f"🚨 MEXC FUTURES PUMP ALERT\n\n"
+                        f"🚨 MEXC FUTURES OWFAH ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
+                        f"⏱ Timeframe: 15m\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
-                        f"Confirmations: {confirmations}/3\n"
                         f"VWAP: {vwap_str}\n"
                         f"POC (Vol Profile): {poc_str}\n"
-                        f"Candle Strength: {strength_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
                     )
@@ -1206,70 +1243,52 @@ async def scan_binance_futures(first_run=False):
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
                 continue
-            klines = await fetch_binance_klines(symbol)
+                
+            # Fetch 15m klines for OWFAH
+            klines = await fetch_binance_klines(symbol, interval="15m")
             if not klines or len(klines["closes"]) < 14:
                 continue
-            closes = klines["closes"]
-            opens = klines["opens"]
-            highs = klines["highs"]
-            lows = klines["lows"]
-            volumes = klines["volumes"]
-            
-            vwap = calculate_vwap(highs, lows, closes, volumes)
-            poc = calculate_poc(highs, lows, closes, volumes)
-            latest_strength = calculate_candle_strength(opens[-1], closes[-1], highs[-1], lows[-1])
-            candle_bullish = closes[-1] > opens[-1]
-            candle_bearish = closes[-1] < opens[-1]
+                
+            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = calculate_poc(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_binance_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
-            cvd = of.get('cvd', 0.0)
-
-            if price_change > 0:
-                signal = "Long"
-                vwap_confirmed = (vwap is not None and current_price > vwap)
-                of_confirmed = (footprint > BINANCE_FOOTPRINT_THRESHOLD and cvd > BINANCE_CVD_THRESHOLD)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bullish)
-            else:
-                signal = "Short"
-                vwap_confirmed = (vwap is not None and current_price < vwap)
-                of_confirmed = (footprint < -BINANCE_FOOTPRINT_THRESHOLD and cvd < -BINANCE_CVD_THRESHOLD)
-                candle_confirmed = (latest_strength >= 0.6 and candle_bearish)
-                
-            confirmations = sum([vwap_confirmed, of_confirmed, candle_confirmed])
             
-            if confirmations < 3:
+            owfah = calculate_owfah(klines["deltas"], klines["volumes"], footprint)
+            
+            # OWFAH Trigger replaces 3/3 confirmations
+            if owfah['signal'] is not None:
+                if alerted == 0:
+                    cursor.execute(
+                        "UPDATE binance_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
+                        (volume, current_price, now, symbol)
+                    )
+                    conn.commit()
+                    
+                    signal = owfah['signal'].capitalize()
+                    vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
+                    poc_str = f"{poc:.4f}" if poc is not None else "N/A"
+                    of_line = format_of_line(of, owfah)
+                    
+                    message = (
+                        f"🚨 BINANCE FUTURES OWFAH ALERT\n\n"
+                        f"Contract: {symbol}\n"
+                        f"⏱ Timeframe: 15m\n"
+                        f"Price Change: {price_change:+.2f}%\n"
+                        f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
+                        f"Volume: ${volume:,.0f}\n"
+                        f"Entry Signal: Consider {signal}\n"
+                        f"VWAP: {vwap_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
+                        f"{of_line}\n\n"
+                        f"========================"
+                    )
+                    await send_telegram(message, tradingview_url("binance_fut", symbol))
+            else:
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
-                continue
-                
-            if alerted == 0:
-                cursor.execute(
-                    "UPDATE binance_futures_listings SET alerted=1, baseline_volume=?, baseline_price=?, last_alert=? WHERE symbol=?",
-                    (volume, current_price, now, symbol)
-                )
-                conn.commit()
-                vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
-                poc_str = f"{poc:.4f}" if poc is not None else "N/A"
-                strength_str = f"{latest_strength:.2f}"
-                of_line = format_of_line(of)
-                message = (
-                    f"🚨 BINANCE FUTURES PUMP ALERT\n\n"
-                    f"Contract: {symbol}\n"
-                    f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
-                    f"Price Change: {price_change:+.2f}%\n"
-                    f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
-                    f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: Consider {signal}\n"
-                    f"Confirmations: {confirmations}/3\n"
-                    f"VWAP: {vwap_str}\n"
-                    f"POC (Vol Profile): {poc_str}\n"
-                    f"Candle Strength: {strength_str}\n"
-                    f"{of_line}\n\n"
-                    f"========================"
-                )
-                await send_telegram(message, tradingview_url("binance_fut", symbol))
     except Exception:
         print("Binance Futures scan error:")
         traceback.print_exc()
@@ -1283,7 +1302,8 @@ async def main():
     await send_telegram(
         f"Sniping 🍁\n"
         f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n\n"
-        f"Send /timeframe to change."
+        f"Send /timeframe to change.\n"
+        f"Send /watchlist to view active alerts."
     )
 
     asyncio.create_task(binance_ws_manager())
