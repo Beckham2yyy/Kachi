@@ -80,6 +80,15 @@ def get_tf_binance():
     return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["binance"]
 
 # =========================
+# BTC WATCHLIST STATE
+# =========================
+
+BTC_WATCHLIST = {
+    "highest_bid_wall": {"price": 0.0, "vol": 0.0},
+    "highest_ask_wall": {"price": 0.0, "vol": 0.0}
+}
+
+# =========================
 # TRADINGVIEW URL HELPER
 # =========================
 
@@ -124,9 +133,14 @@ def format_footprint(fp):
 def format_of_line(of, owfah=None):
     fp = of.get('footprint', 0.0)
     cvd = of.get('cvd', 0.0)
-    mb = of.get('max_bid', 0.0)
-    ma = of.get('max_ask', 0.0)
-    base_str = f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)} │ Walls: B {mb:.1f} / A {ma:.1f}"
+    mb_vol = of.get('max_bid_vol', 0.0)
+    mb_price = of.get('max_bid_price', 0.0)
+    ma_vol = of.get('max_ask_vol', 0.0)
+    ma_price = of.get('max_ask_price', 0.0)
+    
+    wall_str = f" │ Walls: B {mb_vol:.1f}@{mb_price:.4f} / A {ma_vol:.1f}@{ma_price:.4f}"
+    base_str = f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)}{wall_str}"
+    
     if owfah:
         base_str += f" │ MaxD {format_cvd(owfah['max_delta'])} │ MinD {format_cvd(owfah['min_delta'])}"
         if owfah['signal']:
@@ -151,19 +165,26 @@ def calculate_poc(highs, lows, closes, volumes):
     return poc
 
 def calculate_walls(bids, asks):
-    max_bid = 0.0
-    max_ask = 0.0
+    max_bid_vol = 0.0
+    max_bid_price = 0.0
+    max_ask_vol = 0.0
+    max_ask_price = 0.0
+    
     for b in bids:
         if len(b) >= 2:
             size = abs(float(b[1]))
-            if size > max_bid:
-                max_bid = size
+            if size > max_bid_vol:
+                max_bid_vol = size
+                max_bid_price = float(b[0])
+                
     for a in asks:
         if len(a) >= 2:
             size = abs(float(a[1]))
-            if size > max_ask:
-                max_ask = size
-    return max_bid, max_ask
+            if size > max_ask_vol:
+                max_ask_vol = size
+                max_ask_price = float(a[0])
+                
+    return max_bid_vol, max_bid_price, max_ask_vol, max_ask_price
 
 def calculate_owfah(deltas, volumes, footprint):
     if len(deltas) < 2 or len(volumes) < 2:
@@ -176,7 +197,7 @@ def calculate_owfah(deltas, volumes, footprint):
     curr_delta = deltas[-1]
     avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
     
-    # Check if previous candle had a delta volume spike > 11%
+    # Delta volume threshold above 11%
     prev_spike = (abs(prev_delta) / prev_vol) > 0.11 if prev_vol > 0 else False
     
     # LONG: Max delta aligns with footprint, min delta is small (10-0)
@@ -199,7 +220,7 @@ def calculate_owfah(deltas, volumes, footprint):
     return {'signal': signal, 'max_delta': max_delta, 'min_delta': min_delta}
 
 async def fetch_gateio_spot_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.gateio.ws/api/v4/spot/order_book?currency_pair={symbol}&limit=20"
@@ -213,7 +234,7 @@ async def fetch_gateio_spot_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
-                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
+                    result['max_bid_vol'], result['max_bid_price'], result['max_ask_vol'], result['max_ask_price'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -235,7 +256,7 @@ async def fetch_gateio_spot_orderflow(symbol):
     return result
 
 async def fetch_gateio_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.gateio.ws/api/v4/futures/usdt/order_book?contract={symbol}&limit=20"
@@ -249,7 +270,7 @@ async def fetch_gateio_fut_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
-                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
+                    result['max_bid_vol'], result['max_bid_price'], result['max_ask_vol'], result['max_ask_price'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -267,7 +288,7 @@ async def fetch_gateio_fut_orderflow(symbol):
     return result
 
 async def fetch_mexc_spot_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://api.mexc.com/api/v3/depth?symbol={symbol}&limit=20"
@@ -281,7 +302,7 @@ async def fetch_mexc_spot_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
-                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
+                    result['max_bid_vol'], result['max_bid_price'], result['max_ask_vol'], result['max_ask_price'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -302,7 +323,7 @@ async def fetch_mexc_spot_orderflow(symbol):
     return result
 
 async def fetch_mexc_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://contract.mexc.com/api/v1/contract/depth/{symbol}?limit=20"
@@ -318,7 +339,7 @@ async def fetch_mexc_fut_orderflow(symbol):
                         total = bid_vol + ask_vol
                         if total > 0:
                             result['footprint'] = (bid_vol - ask_vol) / total
-                        result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
+                        result['max_bid_vol'], result['max_bid_price'], result['max_ask_vol'], result['max_ask_price'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -342,7 +363,7 @@ async def fetch_mexc_fut_orderflow(symbol):
     return result
 
 async def fetch_binance_fut_orderflow(symbol):
-    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid': 0.0, 'max_ask': 0.0}
+    result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
     async with aiohttp.ClientSession() as session:
         try:
             url = f"https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=20"
@@ -356,7 +377,7 @@ async def fetch_binance_fut_orderflow(symbol):
                     total = bid_vol + ask_vol
                     if total > 0:
                         result['footprint'] = (bid_vol - ask_vol) / total
-                    result['max_bid'], result['max_ask'] = calculate_walls(bids, asks)
+                    result['max_bid_vol'], result['max_bid_price'], result['max_ask_vol'], result['max_ask_price'] = calculate_walls(bids, asks)
         except Exception:
             pass
         try:
@@ -497,7 +518,6 @@ async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 highs = [float(c[3]) for c in data]
                 lows = [float(c[4]) for c in data]
                 volumes = [float(c[6]) for c in data]
-                # Gate.io doesn't have taker buy in standard klines, so we proxy delta
                 deltas = [v if c > o else -v for o, c, v in zip(opens, closes, volumes)]
                 return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
@@ -526,7 +546,6 @@ async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
                 highs = [float(h) for _, _, _, h, _, _ in combined]
                 lows = [float(l) for _, _, _, _, l, _ in combined]
                 volumes = [float(v) for _, _, _, _, _, v in combined]
-                # MEXC doesn't have taker buy in standard klines, proxy delta
                 deltas = [v if c > o else -v for o, c, v in zip(opens, closes, volumes)]
                 return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
@@ -547,7 +566,6 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
                 lows = [float(c[3]) for c in data]
                 closes = [float(c[4]) for c in data]
                 volumes = [float(c[5]) for c in data]
-                # Binance provides taker buy base asset volume at index 9
                 deltas = [(2 * float(c[9])) - float(c[5]) for c in data]
                 return {"closes": closes, "opens": opens, "highs": highs, "lows": lows, "volumes": volumes, "deltas": deltas}
         except Exception:
@@ -1050,7 +1068,6 @@ async def scan_gateio_futures(first_run=False):
                     conn.commit()
                 continue
             
-            # Fetch 15m klines specifically for OWFAH sequence logic
             klines = await fetch_gateio_klines(symbol, interval="15m")
             if not klines or len(klines["closes"]) < 14:
                 continue
@@ -1063,7 +1080,6 @@ async def scan_gateio_futures(first_run=False):
             
             owfah = calculate_owfah(klines["deltas"], klines["volumes"], footprint)
             
-            # OWFAH Sequence Trigger
             if owfah['signal'] is not None:
                 if alerted == 0:
                     cursor.execute(
@@ -1078,7 +1094,7 @@ async def scan_gateio_futures(first_run=False):
                     of_line = format_of_line(of, owfah)
                     
                     message = (
-                        f"🚨 GATE.IO FUTURES OWFAH ALERT\n\n"
+                        f"🚨 GATE.IO FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
                         f"⏱ Timeframe: 15m\n"
                         f"Price Change: {price_change:+.2f}%\n"
@@ -1151,7 +1167,6 @@ async def scan_mexc_futures(first_run=False):
                     conn.commit()
                 continue
                 
-            # Fetch 15m klines for OWFAH
             klines = await fetch_mexc_klines(symbol, interval="Min15")
             if not klines or len(klines["closes"]) < 14:
                 continue
@@ -1178,7 +1193,7 @@ async def scan_mexc_futures(first_run=False):
                     of_line = format_of_line(of, owfah)
                     
                     message = (
-                        f"🚨 MEXC FUTURES OWFAH ALERT\n\n"
+                        f"🚨 MEXC FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
                         f"⏱ Timeframe: 15m\n"
                         f"Price Change: {price_change:+.2f}%\n"
@@ -1250,7 +1265,6 @@ async def scan_binance_futures(first_run=False):
                     conn.commit()
                 continue
                 
-            # Fetch 15m klines for OWFAH
             klines = await fetch_binance_klines(symbol, interval="15m")
             if not klines or len(klines["closes"]) < 14:
                 continue
@@ -1263,7 +1277,6 @@ async def scan_binance_futures(first_run=False):
             
             owfah = calculate_owfah(klines["deltas"], klines["volumes"], footprint)
             
-            # OWFAH Trigger replaces 3/3 confirmations
             if owfah['signal'] is not None:
                 if alerted == 0:
                     cursor.execute(
@@ -1278,7 +1291,7 @@ async def scan_binance_futures(first_run=False):
                     of_line = format_of_line(of, owfah)
                     
                     message = (
-                        f"🚨 BINANCE FUTURES OWFAH ALERT\n\n"
+                        f"🚨 BINANCE FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
                         f"⏱ Timeframe: 15m\n"
                         f"Price Change: {price_change:+.2f}%\n"
@@ -1295,6 +1308,53 @@ async def scan_binance_futures(first_run=False):
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
                     conn.commit()
+
+            # BTC Watchlist Logic
+            if symbol == "BTCUSDT":
+                mb_vol = of.get('max_bid_vol', 0.0)
+                mb_price = of.get('max_bid_price', 0.0)
+                ma_vol = of.get('max_ask_vol', 0.0)
+                ma_price = of.get('max_ask_price', 0.0)
+                
+                # Record highest and reoccurring liquidity walls
+                if mb_vol > 50:  
+                    if mb_vol > BTC_WATCHLIST["highest_bid_wall"]["vol"]:
+                        BTC_WATCHLIST["highest_bid_wall"] = {"price": mb_price, "vol": mb_vol}
+                if ma_vol > 50:
+                    if ma_vol > BTC_WATCHLIST["highest_ask_wall"]["vol"]:
+                        BTC_WATCHLIST["highest_ask_wall"] = {"price": ma_price, "vol": ma_vol}
+                
+                bid_wall_price = BTC_WATCHLIST["highest_bid_wall"]["price"]
+                ask_wall_price = BTC_WATCHLIST["highest_ask_wall"]["price"]
+                
+                # Price reaches bid wall -> wait for absorption + aggression
+                if bid_wall_price > 0 and abs(current_price - bid_wall_price) / current_price < 0.002:
+                    if footprint > 0.1 and owfah['signal'] == 'LONG':
+                        message = (
+                            f"🚨 OWFAH/2 BTC WALL BOUNCE\n\n"
+                            f"Reached Bid Wall at {bid_wall_price:.2f}\n"
+                            f"Wall Volume: {BTC_WATCHLIST['highest_bid_wall']['vol']:.2f}\n"
+                            f"Price: {current_price:.2f}\n"
+                            f"📊 OF: FP {format_footprint(footprint)} │ CVD {format_cvd(of.get('cvd', 0.0))}\n"
+                            f"🔥 Absorption & Aggression Detected!\n"
+                        )
+                        await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
+                        BTC_WATCHLIST["highest_bid_wall"] = {"price": 0.0, "vol": 0.0}
+                        
+                # Price reaches ask wall -> wait for absorption + aggression
+                if ask_wall_price > 0 and abs(current_price - ask_wall_price) / current_price < 0.002:
+                    if footprint < -0.1 and owfah['signal'] == 'SHORT':
+                        message = (
+                            f"🚨 OWFAH/2 BTC WALL REJECTION\n\n"
+                            f"Reached Ask Wall at {ask_wall_price:.2f}\n"
+                            f"Wall Volume: {BTC_WATCHLIST['highest_ask_wall']['vol']:.2f}\n"
+                            f"Price: {current_price:.2f}\n"
+                            f"📊 OF: FP {format_footprint(footprint)} │ CVD {format_cvd(of.get('cvd', 0.0))}\n"
+                            f"🔥 Absorption & Aggression Detected!\n"
+                        )
+                        await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
+                        BTC_WATCHLIST["highest_ask_wall"] = {"price": 0.0, "vol": 0.0}
+                        
     except Exception:
         print("Binance Futures scan error:")
         traceback.print_exc()
@@ -1304,9 +1364,10 @@ async def scan_binance_futures(first_run=False):
 # =========================
 
 async def main():
-    print("Starting Kachi...")
+    print("Starting Owfah/2...")
     await send_telegram(
         f"Sniping 🍁\n"
+        f"Bot: Owfah/2\n"
         f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n\n"
         f"Send /timeframe to change.\n"
         f"Send /watchlist to view active alerts."
