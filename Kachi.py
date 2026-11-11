@@ -60,12 +60,14 @@ BIG_COIN_PRICE_THRESHOLD = 2
 # =========================
 
 CURRENT_TIMEFRAME = "1hr"
-ALLOWED_TIMEFRAMES = ("1d", "30m", "1hr")
+ALLOWED_TIMEFRAMES = ("30m", "1hr", "1d", "1w", "1M")
 
 TIMEFRAME_MAP = {
-    "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
     "30m": {"gateio": "30m", "mexc": "Min30", "binance": "30m"},
     "1hr": {"gateio": "1h",  "mexc": "Min60", "binance": "1h"},
+    "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
+    "1w":  {"gateio": "7d",  "mexc": "Week1", "binance": "1w"},
+    "1M":  {"gateio": "30d", "mexc": "Month1","binance": "1M"},
 }
 
 def get_tf_gateio():
@@ -647,9 +649,13 @@ def timeframe_keyboard():
     return {
         "inline_keyboard": [
             [
-                {"text": "1d",  "callback_data": "tf:1d"},
                 {"text": "30m", "callback_data": "tf:30m"},
                 {"text": "1hr", "callback_data": "tf:1hr"},
+                {"text": "1d",  "callback_data": "tf:1d"},
+            ],
+            [
+                {"text": "1w",  "callback_data": "tf:1w"},
+                {"text": "1M",  "callback_data": "tf:1M"},
             ]
         ]
     }
