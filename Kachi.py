@@ -142,9 +142,10 @@ def format_of_line(of, owfah=None):
     base_str = f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)}{wall_str}"
     
     if owfah:
+        base_str += f" │ D.Vol: {owfah.get('delta_vol_pct', 0.0):.1f}%"
         base_str += f" │ MaxD {format_cvd(owfah['max_delta'])} │ MinD {format_cvd(owfah['min_delta'])}"
         if owfah['signal']:
-            base_str += f"\n🔥 OWFAH: {owfah['signal']} TRIGGERED"
+            base_str += f"\n🔥 OWFAH/2: {owfah['signal']} TRIGGERED"
     return base_str
 
 def calculate_vwap(highs, lows, closes, volumes):
@@ -188,7 +189,7 @@ def calculate_walls(bids, asks):
 
 def calculate_owfah(deltas, volumes, footprint):
     if len(deltas) < 2 or len(volumes) < 2:
-        return {'signal': None, 'max_delta': 0.0, 'min_delta': 0.0}
+        return {'signal': None, 'max_delta': 0.0, 'min_delta': 0.0, 'delta_vol_pct': 0.0}
     
     max_delta = max(deltas)
     min_delta = min(deltas)
@@ -197,8 +198,11 @@ def calculate_owfah(deltas, volumes, footprint):
     curr_delta = deltas[-1]
     avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
     
-    # Delta volume threshold above 11%
-    prev_spike = (abs(prev_delta) / prev_vol) > 0.11 if prev_vol > 0 else False
+    # Calculate exact Delta Volume %
+    delta_vol_pct = (abs(prev_delta) / prev_vol * 100) if prev_vol > 0 else 0.0
+    
+    # Delta volume threshold strictly above 11%
+    prev_spike = delta_vol_pct > 11.0
     
     # LONG: Max delta aligns with footprint, min delta is small (10-0)
     long_signal = (
@@ -217,7 +221,7 @@ def calculate_owfah(deltas, volumes, footprint):
     )
     
     signal = "LONG" if long_signal else ("SHORT" if short_signal else None)
-    return {'signal': signal, 'max_delta': max_delta, 'min_delta': min_delta}
+    return {'signal': signal, 'max_delta': max_delta, 'min_delta': min_delta, 'delta_vol_pct': delta_vol_pct}
 
 async def fetch_gateio_spot_orderflow(symbol):
     result = {'footprint': 0.0, 'cvd': 0.0, 'max_bid_vol': 0.0, 'max_bid_price': 0.0, 'max_ask_vol': 0.0, 'max_ask_price': 0.0}
@@ -1327,29 +1331,31 @@ async def scan_binance_futures(first_run=False):
                 bid_wall_price = BTC_WATCHLIST["highest_bid_wall"]["price"]
                 ask_wall_price = BTC_WATCHLIST["highest_ask_wall"]["price"]
                 
-                # Price reaches bid wall -> wait for absorption + aggression
+                # Price reaches bid wall -> wait for absorption + aggression (Delta Vol > 11%)
                 if bid_wall_price > 0 and abs(current_price - bid_wall_price) / current_price < 0.002:
-                    if footprint > 0.1 and owfah['signal'] == 'LONG':
+                    if footprint > 0.1 and owfah['signal'] == 'LONG' and owfah['delta_vol_pct'] > 11.0:
+                        of_line = format_of_line(of, owfah)
                         message = (
                             f"🚨 OWFAH/2 BTC WALL BOUNCE\n\n"
                             f"Reached Bid Wall at {bid_wall_price:.2f}\n"
                             f"Wall Volume: {BTC_WATCHLIST['highest_bid_wall']['vol']:.2f}\n"
                             f"Price: {current_price:.2f}\n"
-                            f"📊 OF: FP {format_footprint(footprint)} │ CVD {format_cvd(of.get('cvd', 0.0))}\n"
+                            f"{of_line}\n"
                             f"🔥 Absorption & Aggression Detected!\n"
                         )
                         await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
                         BTC_WATCHLIST["highest_bid_wall"] = {"price": 0.0, "vol": 0.0}
                         
-                # Price reaches ask wall -> wait for absorption + aggression
+                # Price reaches ask wall -> wait for absorption + aggression (Delta Vol > 11%)
                 if ask_wall_price > 0 and abs(current_price - ask_wall_price) / current_price < 0.002:
-                    if footprint < -0.1 and owfah['signal'] == 'SHORT':
+                    if footprint < -0.1 and owfah['signal'] == 'SHORT' and owfah['delta_vol_pct'] > 11.0:
+                        of_line = format_of_line(of, owfah)
                         message = (
                             f"🚨 OWFAH/2 BTC WALL REJECTION\n\n"
                             f"Reached Ask Wall at {ask_wall_price:.2f}\n"
                             f"Wall Volume: {BTC_WATCHLIST['highest_ask_wall']['vol']:.2f}\n"
                             f"Price: {current_price:.2f}\n"
-                            f"📊 OF: FP {format_footprint(footprint)} │ CVD {format_cvd(of.get('cvd', 0.0))}\n"
+                            f"{of_line}\n"
                             f"🔥 Absorption & Aggression Detected!\n"
                         )
                         await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
