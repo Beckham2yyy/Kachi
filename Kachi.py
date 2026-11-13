@@ -60,11 +60,14 @@ BIG_COIN_PRICE_THRESHOLD = 2
 # =========================
 
 CURRENT_TIMEFRAME = "1hr"
-ALLOWED_TIMEFRAMES = ("30m", "1hr", "1d", "1w", "1M")
+ALLOWED_TIMEFRAMES = ("5m", "15m", "30m", "1hr", "4h", "1d", "1w", "1M")
 
 TIMEFRAME_MAP = {
+    "5m":  {"gateio": "5m",  "mexc": "Min5",  "binance": "5m"},
+    "15m": {"gateio": "15m", "mexc": "Min15", "binance": "15m"},
     "30m": {"gateio": "30m", "mexc": "Min30", "binance": "30m"},
     "1hr": {"gateio": "1h",  "mexc": "Min60", "binance": "1h"},
+    "4h":  {"gateio": "4h",  "mexc": "Hour4", "binance": "4h"},
     "1d":  {"gateio": "1d",  "mexc": "Day1",  "binance": "1d"},
     "1w":  {"gateio": "7d",  "mexc": "Week1", "binance": "1w"},
     "1M":  {"gateio": "30d", "mexc": "Month1","binance": "1M"},
@@ -198,13 +201,9 @@ def calculate_owfah(deltas, volumes, footprint):
     curr_delta = deltas[-1]
     avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
     
-    # Calculate exact Delta Volume %
     delta_vol_pct = (abs(prev_delta) / prev_vol * 100) if prev_vol > 0 else 0.0
-    
-    # Delta volume threshold strictly above 11%
     prev_spike = delta_vol_pct > 11.0
     
-    # LONG: Max delta aligns with footprint, min delta is small (10-0)
     long_signal = (
         footprint > 0 and
         prev_spike and
@@ -212,7 +211,6 @@ def calculate_owfah(deltas, volumes, footprint):
         (min_delta / avg_vol) < 0.1
     )
     
-    # SHORT: Min delta aligns with footprint, max delta is small (10-0)
     short_signal = (
         footprint < 0 and
         prev_spike and
@@ -508,7 +506,7 @@ def calculate_cvd(trades):
 
 async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
     if interval is None:
-        interval = "15m"
+        interval = get_tf_gateio()
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -529,7 +527,7 @@ async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
 
 async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
     if interval is None:
-        interval = "Min15"
+        interval = get_tf_mexc()
     url = f"https://futures.mexc.com/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -557,7 +555,7 @@ async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
 
 async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT):
     if interval is None:
-        interval = "15m"
+        interval = get_tf_binance()
     url = f"{BINANCE_FUTURES_KLINES}?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -671,8 +669,13 @@ def timeframe_keyboard():
     return {
         "inline_keyboard": [
             [
+                {"text": "5m", "callback_data": "tf:5m"},
+                {"text": "15m", "callback_data": "tf:15m"},
                 {"text": "30m", "callback_data": "tf:30m"},
+            ],
+            [
                 {"text": "1hr", "callback_data": "tf:1hr"},
+                {"text": "4h",  "callback_data": "tf:4h"},
                 {"text": "1d",  "callback_data": "tf:1d"},
             ],
             [
@@ -1072,7 +1075,7 @@ async def scan_gateio_futures(first_run=False):
                     conn.commit()
                 continue
             
-            klines = await fetch_gateio_klines(symbol, interval="15m")
+            klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio())
             if not klines or len(klines["closes"]) < 14:
                 continue
                 
@@ -1100,7 +1103,7 @@ async def scan_gateio_futures(first_run=False):
                     message = (
                         f"🚨 GATE.IO FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: 15m\n"
+                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -1171,7 +1174,7 @@ async def scan_mexc_futures(first_run=False):
                     conn.commit()
                 continue
                 
-            klines = await fetch_mexc_klines(symbol, interval="Min15")
+            klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc())
             if not klines or len(klines["closes"]) < 14:
                 continue
                 
@@ -1199,7 +1202,7 @@ async def scan_mexc_futures(first_run=False):
                     message = (
                         f"🚨 MEXC FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: 15m\n"
+                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
@@ -1269,7 +1272,7 @@ async def scan_binance_futures(first_run=False):
                     conn.commit()
                 continue
                 
-            klines = await fetch_binance_klines(symbol, interval="15m")
+            klines = await fetch_binance_klines(symbol, interval=get_tf_binance())
             if not klines or len(klines["closes"]) < 14:
                 continue
                 
@@ -1297,7 +1300,7 @@ async def scan_binance_futures(first_run=False):
                     message = (
                         f"🚨 BINANCE FUTURES OWFAH/2 ALERT\n\n"
                         f"Contract: {symbol}\n"
-                        f"⏱ Timeframe: 15m\n"
+                        f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                         f"Price Change: {price_change:+.2f}%\n"
                         f"Volume Growth: {cumulative_volume_growth:.2f}%\n"
                         f"Volume: ${volume:,.0f}\n"
