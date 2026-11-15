@@ -466,6 +466,23 @@ CREATE TABLE IF NOT EXISTS binance_futures_listings (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS user_settings (
+    chat_id TEXT PRIMARY KEY,
+    exchanges TEXT DEFAULT 'binance,gateio,mexc,cmc'
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS user_watchlists (
+    chat_id TEXT,
+    symbol TEXT,
+    exchange TEXT,
+    added_at INTEGER,
+    PRIMARY KEY (chat_id, symbol)
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -643,18 +660,24 @@ async def handle_binance_ws_connection(url):
 # TELEGRAM (send)
 # =========================
 
-async def send_telegram(message, chart_url=None):
+async def send_telegram(message, exchange=None, symbol=None, chart_url=None):
     try:
         async with aiohttp.ClientSession() as session:
             for chat_id in TELEGRAM_CHAT_IDS:
+                if exchange:
+                    cursor.execute("SELECT exchanges FROM user_settings WHERE chat_id=?", (str(chat_id),))
+                    row = cursor.fetchone()
+                    enabled = row[0].split(',') if row else ['binance', 'gateio', 'mexc', 'cmc']
+                    if exchange not in enabled:
+                        continue
+                
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": message}
                 if chart_url:
-                    payload["reply_markup"] = {
-                        "inline_keyboard": [[
-                            {"text": "📊 Chart", "url": chart_url}
-                        ]]
-                    }
+                    kb = [[{"text": "📊 Chart", "url": chart_url}]]
+                    if symbol:
+                        kb[0].append({"text": "➕ Watchlist", "callback_data": f"wl:{exchange}:{symbol}"})
+                    payload["reply_markup"] = {"inline_keyboard": kb}
                 async with session.post(url, json=payload) as resp:
                     if resp.status != 200:
                         print(f"Telegram error for {chat_id}:", resp.status)
@@ -662,7 +685,7 @@ async def send_telegram(message, chart_url=None):
         print("Telegram send failed:", e)
 
 # =========================
-# TELEGRAM (timeframe UI + polling)
+# TELEGRAM (UI + polling)
 # =========================
 
 def timeframe_keyboard():
@@ -685,6 +708,22 @@ def timeframe_keyboard():
         ]
     }
 
+def exchange_keyboard(chat_id):
+    cursor.execute("SELECT exchanges FROM user_settings WHERE chat_id=?", (str(chat_id),))
+    row = cursor.fetchone()
+    enabled = row[0].split(',') if row else ['binance', 'gateio', 'mexc', 'cmc']
+    
+    def btn(name):
+        mark = "✅" if name in enabled else "❌"
+        return {"text": f"{mark} {name.capitalize()}", "callback_data": f"ex:{name}"}
+
+    return {
+        "inline_keyboard": [
+            [btn('binance'), btn('gateio'), btn('mexc')],
+            [btn('cmc')]
+        ]
+    }
+
 async def send_timeframe_picker(session, chat_id, text=None):
     if text is None:
         text = (
@@ -694,6 +733,15 @@ async def send_timeframe_picker(session, chat_id, text=None):
         )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "reply_markup": timeframe_keyboard()}
+    async with session.post(url, json=payload) as resp:
+        if resp.status != 200:
+            print(f"Telegram picker error for {chat_id}:", resp.status)
+
+async def send_exchange_picker(session, chat_id, text=None):
+    if text is None:
+        text = "⚙️ Exchange Settings\n\nSelect which exchanges you want alerts from:"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": exchange_keyboard(chat_id)}
     async with session.post(url, json=payload) as resp:
         if resp.status != 200:
             print(f"Telegram picker error for {chat_id}:", resp.status)
@@ -717,27 +765,24 @@ async def handle_message(session, message):
     if str(chat_id) not in TELEGRAM_CHAT_IDS:
         return
     text = (message.get("text") or "").strip()
+    
     if text.startswith("/timeframe") or text.startswith("/start"):
         await send_timeframe_picker(session, chat_id)
+        
+    elif text.startswith("/settings") or text.startswith("/exchanges"):
+        await send_exchange_picker(session, chat_id)
+        
     elif text.startswith("/watchlist"):
         try:
-            cursor.execute("SELECT symbol, last_alert FROM binance_futures_listings WHERE alerted=1 ORDER BY last_alert DESC LIMIT 5")
-            binance_list = cursor.fetchall()
-            cursor.execute("SELECT symbol, last_alert FROM gateio_futures_listings WHERE alerted=1 ORDER BY last_alert DESC LIMIT 5")
-            gate_list = cursor.fetchall()
+            cursor.execute("SELECT symbol, exchange FROM user_watchlists WHERE chat_id=? ORDER BY added_at DESC", (str(chat_id),))
+            wl_list = cursor.fetchall()
             
-            msg = "👀 **Active Watchlist (Recent Alerts)**\n\n"
-            if binance_list or gate_list:
-                if binance_list:
-                    msg += "Binance:\n"
-                    for sym, ts in binance_list:
-                        msg += f"• {sym} ({int((time.time()-ts)/60)}m ago)\n"
-                if gate_list:
-                    msg += "\nGate.io:\n"
-                    for sym, ts in gate_list:
-                        msg += f"• {sym} ({int((time.time()-ts)/60)}m ago)\n"
+            msg = "👀 **Your Watchlist**\n\n"
+            if wl_list:
+                for sym, ex in wl_list:
+                    msg += f"• {sym} ({ex})\n"
             else:
-                msg += "No active alerts right now."
+                msg += "Your watchlist is empty."
                 
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {"chat_id": chat_id, "text": msg}
@@ -756,9 +801,45 @@ async def handle_callback(session, callback):
     if str(chat_id) not in TELEGRAM_CHAT_IDS:
         await answer_callback(session, callback_id, "Not authorized.")
         return
+
+    if data.startswith("ex:"):
+        ex_name = data[3:]
+        cursor.execute("SELECT exchanges FROM user_settings WHERE chat_id=?", (str(chat_id),))
+        row = cursor.fetchone()
+        if row:
+            enabled = row[0].split(',')
+        else:
+            enabled = ['binance', 'gateio', 'mexc', 'cmc']
+            cursor.execute("INSERT INTO user_settings (chat_id, exchanges) VALUES (?, ?)", (str(chat_id), ",".join(enabled)))
+            conn.commit()
+            
+        if ex_name in enabled:
+            enabled.remove(ex_name)
+        else:
+            enabled.append(ex_name)
+            
+        cursor.execute("UPDATE user_settings SET exchanges=? WHERE chat_id=?", (",".join(enabled), str(chat_id)))
+        conn.commit()
+        await answer_callback(session, callback_id, f"Toggled {ex_name}")
+        new_text = "⚙️ Exchange Settings\n\nSelect which exchanges you want alerts from:"
+        await edit_message(session, chat_id, message_id, new_text, exchange_keyboard(chat_id))
+        return
+
+    if data.startswith("wl:"):
+        parts = data.split(":")
+        if len(parts) >= 3:
+            ex_name = parts[1]
+            sym = parts[2]
+            now = int(time.time())
+            cursor.execute("INSERT OR REPLACE INTO user_watchlists (chat_id, symbol, exchange, added_at) VALUES (?, ?, ?, ?)", (str(chat_id), sym, ex_name, now))
+            conn.commit()
+            await answer_callback(session, callback_id, f"Added {sym} to watchlist")
+        return
+
     if not data.startswith("tf:"):
         await answer_callback(session, callback_id, "Unknown action.")
         return
+    
     new_tf = data[3:]
     if new_tf not in ALLOWED_TIMEFRAMES:
         await answer_callback(session, callback_id, "Invalid timeframe.")
@@ -868,7 +949,7 @@ async def scan_gateio(first_run=False):
                     f"{of_line}\n\n"
                     f"========================"
                 )
-                await send_telegram(message, tradingview_url("gateio_spot", symbol))
+                await send_telegram(message, "gateio", symbol, tradingview_url("gateio_spot", symbol))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE gateio_listings SET alerted=0 WHERE symbol=?", (symbol,))
                 conn.commit()
@@ -941,7 +1022,7 @@ async def scan_mexc(first_run=False):
                     f"{of_line}\n\n"
                     f"========================"
                 )
-                await send_telegram(message, tradingview_url("mexc_spot", symbol))
+                await send_telegram(message, "mexc", symbol, tradingview_url("mexc_spot", symbol))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE mexc_listings SET alerted=0 WHERE symbol=?", (symbol,))
                 conn.commit()
@@ -1016,7 +1097,7 @@ async def scan_cmc(first_run=False):
                     f"Chart:\n{chart_link}\n\n"
                     f"========================"
                 )
-                await send_telegram(message, tradingview_url("cmc", coin['symbol']))
+                await send_telegram(message, "cmc", coin['symbol'], tradingview_url("cmc", coin['symbol']))
             elif not pump_condition and alerted == 1:
                 cursor.execute("UPDATE cmc_listings SET alerted=0 WHERE id=?", (coin_id,))
                 conn.commit()
@@ -1113,7 +1194,7 @@ async def scan_gateio_futures(first_run=False):
                         f"{of_line}\n\n"
                         f"========================"
                     )
-                    await send_telegram(message, tradingview_url("gateio_fut", symbol))
+                    await send_telegram(message, "gateio", symbol, tradingview_url("gateio_fut", symbol))
             else:
                 if alerted == 1:
                     cursor.execute("UPDATE gateio_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -1212,7 +1293,7 @@ async def scan_mexc_futures(first_run=False):
                         f"{of_line}\n\n"
                         f"========================"
                     )
-                    await send_telegram(message, tradingview_url("mexc_fut", symbol))
+                    await send_telegram(message, "mexc", symbol, tradingview_url("mexc_fut", symbol))
             else:
                 if alerted == 1:
                     cursor.execute("UPDATE mexc_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -1310,7 +1391,7 @@ async def scan_binance_futures(first_run=False):
                         f"{of_line}\n\n"
                         f"========================"
                     )
-                    await send_telegram(message, tradingview_url("binance_fut", symbol))
+                    await send_telegram(message, "binance", symbol, tradingview_url("binance_fut", symbol))
             else:
                 if alerted == 1:
                     cursor.execute("UPDATE binance_futures_listings SET alerted=0 WHERE symbol=?", (symbol,))
@@ -1346,7 +1427,7 @@ async def scan_binance_futures(first_run=False):
                             f"{of_line}\n"
                             f"🔥 Absorption & Aggression Detected!\n"
                         )
-                        await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
+                        await send_telegram(message, "binance", "BTCUSDT", tradingview_url("binance_fut", "BTCUSDT"))
                         BTC_WATCHLIST["highest_bid_wall"] = {"price": 0.0, "vol": 0.0}
                         
                 # Price reaches ask wall -> wait for absorption + aggression (Delta Vol > 11%)
@@ -1361,7 +1442,7 @@ async def scan_binance_futures(first_run=False):
                             f"{of_line}\n"
                             f"🔥 Absorption & Aggression Detected!\n"
                         )
-                        await send_telegram(message, tradingview_url("binance_fut", "BTCUSDT"))
+                        await send_telegram(message, "binance", "BTCUSDT", tradingview_url("binance_fut", "BTCUSDT"))
                         BTC_WATCHLIST["highest_ask_wall"] = {"price": 0.0, "vol": 0.0}
                         
     except Exception:
@@ -1379,6 +1460,7 @@ async def main():
         f"Bot: Owfah/2\n"
         f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n\n"
         f"Send /timeframe to change.\n"
+        f"Send /settings to choose exchanges.\n"
         f"Send /watchlist to view active alerts."
     )
 
