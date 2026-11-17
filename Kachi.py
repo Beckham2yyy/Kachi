@@ -777,21 +777,102 @@ async def handle_message(session, message):
             cursor.execute("SELECT symbol, exchange FROM user_watchlists WHERE chat_id=? ORDER BY added_at DESC", (str(chat_id),))
             wl_list = cursor.fetchall()
             
+            if not wl_list:
+                msg = "👀 **Your Watchlist**\n\nYour watchlist is empty."
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                await session.post(url, json={"chat_id": chat_id, "text": msg})
+                return
+                
             msg = "👀 **Your Watchlist**\n\n"
             kb = []
-            if wl_list:
+            
+            async with aiohttp.ClientSession() as s:
                 for sym, ex in wl_list:
-                    msg += f"• {sym} ({ex})\n"
+                    # Fetch specific coin data based on exchange
+                    current_price = 0.0
+                    price_change = 0.0
+                    volume = 0.0
+                    vwap = None
+                    svp = None
+                    of_data = None
+                    
+                    if ex == "binance":
+                        url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={sym}"
+                        async with s.get(url) as r:
+                            if r.status == 200:
+                                d = await r.json()
+                                current_price = float(d.get("lastPrice", 0))
+                                price_change = float(d.get("priceChangePercent", 0))
+                                volume = float(d.get("quoteVolume", 0))
+                        klines = await fetch_binance_klines(sym, interval=get_tf_binance())
+                        if klines:
+                            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                            svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                        of_data = await fetch_binance_fut_orderflow(sym)
+                        
+                    elif ex == "gateio":
+                        g_sym = sym if "_" in sym else f"{sym[:-4]}_USDT"
+                        url = f"https://api.gateio.ws/api/v4/futures/usdt/tickers?contract={g_sym}"
+                        async with s.get(url) as r:
+                            if r.status == 200:
+                                d = await r.json()
+                                if d:
+                                    current_price = float(d[0].get("last", 0))
+                                    price_change = float(d[0].get("change_percentage", 0))
+                                    volume = float(d[0].get("volume_24h_quote", 0))
+                        klines = await fetch_gateio_klines(g_sym, interval=get_tf_gateio())
+                        if klines:
+                            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                            svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                        of_data = await fetch_gateio_fut_orderflow(g_sym)
+                        
+                    elif ex == "mexc":
+                        m_sym = sym if "_" in sym else f"{sym[:-4]}_USDT"
+                        url = f"https://contract.mexc.com/api/v1/contract/ticker?symbol={m_sym}"
+                        async with s.get(url) as r:
+                            if r.status == 200:
+                                d = await r.json()
+                                if d.get("success"):
+                                    current_price = float(d["data"].get("lastPrice", 0))
+                                    price_change = float(d["data"].get("riseFallRate", 0)) * 100
+                                    volume = float(d["data"].get("amount24", 0))
+                        klines = await fetch_mexc_klines(m_sym, interval=get_tf_mexc())
+                        if klines:
+                            vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                            svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+                        of_data = await fetch_mexc_fut_orderflow(m_sym)
+                        
+                    elif ex == "cmc":
+                        url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
+                        async with s.get(url) as r:
+                            if r.status == 200:
+                                d = await r.json()
+                                current_price = float(d.get("lastPrice", 0))
+                                price_change = float(d.get("priceChangePercent", 0))
+                                volume = float(d.get("quoteVolume", 0))
+                        of_data = await fetch_binance_fut_orderflow(sym)
+                    
+                    vwap_str = f"{vwap:.4f}" if vwap else "N/A"
+                    svp_str = f"{svp:.4f}" if svp else "N/A"
+                    
+                    msg += f"**{sym}** ({ex})\n"
+                    msg += f"Price: ${current_price:.4f} ({price_change:+.2f}%)\n"
+                    msg += f"Volume: ${volume:,.0f}\n"
+                    if vwap and svp:
+                        msg += f"VWAP: {vwap_str} │ SVP: {svp_str}\n"
+                    if of_data:
+                        msg += f"{format_of_line(of_data)}\n\n"
+                    else:
+                        msg += "\n"
+                        
                     kb.append([{"text": f"❌ Remove {sym} ({ex})", "callback_data": f"rwl:{sym}:{ex}"}])
-            else:
-                msg += "Your watchlist is empty."
-                
+            
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {"chat_id": chat_id, "text": msg}
+            payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
             if kb:
                 payload["reply_markup"] = {"inline_keyboard": kb}
-            async with session.post(url, json=payload):
-                pass
+            await session.post(url, json=payload)
+            
         except Exception as e:
             print(f"Watchlist error: {e}")
 
@@ -849,7 +930,7 @@ async def handle_callback(session, callback):
             conn.commit()
             await answer_callback(session, callback_id, f"Removed {sym} from watchlist")
             
-            # Refresh the message
+            # Refresh the message text
             cursor.execute("SELECT symbol, exchange FROM user_watchlists WHERE chat_id=? ORDER BY added_at DESC", (str(chat_id),))
             wl_list = cursor.fetchall()
             new_msg = "👀 **Your Watchlist**\n\n"
