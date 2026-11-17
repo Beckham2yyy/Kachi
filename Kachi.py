@@ -801,7 +801,6 @@ async def handle_message(session, message):
                         price_change = 0.0
                         volume = 0.0
                         vwap = None
-                        svp = None
                         of_data = None
                         klines = None
                         
@@ -816,7 +815,6 @@ async def handle_message(session, message):
                             klines = await fetch_binance_klines(sym, interval=get_tf_binance())
                             if klines:
                                 vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-                                svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
                             of_data = await fetch_binance_fut_orderflow(sym)
                             
                         elif ex == "gateio":
@@ -832,7 +830,6 @@ async def handle_message(session, message):
                             klines = await fetch_gateio_klines(g_sym, interval=get_tf_gateio())
                             if klines:
                                 vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-                                svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
                             of_data = await fetch_gateio_fut_orderflow(g_sym)
                             
                         elif ex == "mexc":
@@ -848,7 +845,6 @@ async def handle_message(session, message):
                             klines = await fetch_mexc_klines(m_sym, interval=get_tf_mexc())
                             if klines:
                                 vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-                                svp, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
                             of_data = await fetch_mexc_fut_orderflow(m_sym)
                             
                         elif ex == "cmc":
@@ -862,13 +858,12 @@ async def handle_message(session, message):
                             of_data = await fetch_binance_fut_orderflow(f"{sym}USDT")
                         
                         vwap_str = f"{vwap:.4f}" if vwap else "N/A"
-                        svp_str = f"{svp:.4f}" if svp else "N/A"
                         
                         msg += f"<b>{sym}</b> ({ex})\n"
                         msg += f"Price: ${current_price:.4f} ({price_change:+.2f}%)\n"
                         msg += f"Volume: ${volume:,.0f}\n"
-                        if vwap and svp:
-                            msg += f"VWAP: {vwap_str} │ SVP: {svp_str}\n"
+                        if vwap:
+                            msg += f"VWAP: {vwap_str}\n"
                         if of_data:
                             msg += f"{format_of_line(of_data)}\n"
                             if klines:
