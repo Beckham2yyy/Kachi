@@ -783,7 +783,6 @@ async def handle_message(session, message):
                 await session.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"})
                 return
             
-            # Send a loading message
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             resp = await session.post(url, json={"chat_id": chat_id, "text": "⏳ Fetching watchlist details..."})
             if resp.status == 200:
@@ -798,13 +797,13 @@ async def handle_message(session, message):
             async with aiohttp.ClientSession() as s:
                 for sym, ex in wl_list:
                     try:
-                        # Fetch specific coin data based on exchange
                         current_price = 0.0
                         price_change = 0.0
                         volume = 0.0
                         vwap = None
                         svp = None
                         of_data = None
+                        klines = None
                         
                         if ex == "binance":
                             url = f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={sym}"
@@ -871,7 +870,11 @@ async def handle_message(session, message):
                         if vwap and svp:
                             msg += f"VWAP: {vwap_str} │ SVP: {svp_str}\n"
                         if of_data:
-                            msg += f"{format_of_line(of_data)}\n\n"
+                            msg += f"{format_of_line(of_data)}\n"
+                            if klines:
+                                owfah_data = calculate_owfah(klines["deltas"], klines["volumes"], of_data.get('footprint', 0.0))
+                                msg += f"MaxD: {format_cvd(owfah_data['max_delta'])} │ MinD: {format_cvd(owfah_data['min_delta'])}\n"
+                            msg += "\n"
                         else:
                             msg += "\n"
                             
@@ -882,10 +885,7 @@ async def handle_message(session, message):
                         msg += f"<b>{sym}</b> ({ex})\n⚠️ Error fetching data\n\n"
                         kb.append([{"text": f"❌ Remove {sym} ({ex})", "callback_data": f"rwl:{sym}:{ex}"}])
             
-            # Edit the loading message with the final data
             if load_msg_id:
-                await edit_message(session, chat_id, load_msg_id, msg, {"inline_keyboard": kb} if kb else None)
-                # Edit message doesn't support parse_mode in the function, so we do it manually
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
                 payload = {"chat_id": chat_id, "message_id": load_msg_id, "text": msg, "parse_mode": "HTML"}
                 if kb:
@@ -955,7 +955,6 @@ async def handle_callback(session, callback):
             conn.commit()
             await answer_callback(session, callback_id, f"Removed {sym} from watchlist")
             
-            # Refresh the message text
             cursor.execute("SELECT symbol, exchange FROM user_watchlists WHERE chat_id=? ORDER BY added_at DESC", (str(chat_id),))
             wl_list = cursor.fetchall()
             new_msg = "👀 <b>Your Watchlist</b>\n\n"
@@ -1299,7 +1298,7 @@ async def scan_gateio_futures(first_run=False):
                 continue
                 
             vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-            svp_price, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc_price, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_gateio_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
@@ -1316,7 +1315,7 @@ async def scan_gateio_futures(first_run=False):
                     
                     signal = owfah['signal'].capitalize()
                     vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
-                    svp_str = f"{svp_price:.4f}" if svp_price is not None else "N/A"
+                    poc_str = f"{poc_price:.4f}" if poc_price is not None else "N/A"
                     of_line = format_of_line(of, owfah)
                     
                     message = (
@@ -1328,7 +1327,7 @@ async def scan_gateio_futures(first_run=False):
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
                         f"VWAP: {vwap_str}\n"
-                        f"SVP (Vol Profile): {svp_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
                     )
@@ -1398,7 +1397,7 @@ async def scan_mexc_futures(first_run=False):
                 continue
                 
             vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-            svp_price, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc_price, _ = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_mexc_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
@@ -1415,7 +1414,7 @@ async def scan_mexc_futures(first_run=False):
                     
                     signal = owfah['signal'].capitalize()
                     vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
-                    svp_str = f"{svp_price:.4f}" if svp_price is not None else "N/A"
+                    poc_str = f"{poc_price:.4f}" if poc_price is not None else "N/A"
                     of_line = format_of_line(of, owfah)
                     
                     message = (
@@ -1427,7 +1426,7 @@ async def scan_mexc_futures(first_run=False):
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
                         f"VWAP: {vwap_str}\n"
-                        f"SVP (Vol Profile): {svp_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
                     )
@@ -1496,7 +1495,7 @@ async def scan_binance_futures(first_run=False):
                 continue
                 
             vwap = calculate_vwap(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-            svp_price, svp_vol = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc_price, poc_vol = calculate_svp(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             
             of = await fetch_binance_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
@@ -1513,7 +1512,7 @@ async def scan_binance_futures(first_run=False):
                     
                     signal = owfah['signal'].capitalize()
                     vwap_str = f"{vwap:.4f}" if vwap is not None else "N/A"
-                    svp_str = f"{svp_price:.4f}" if svp_price is not None else "N/A"
+                    poc_str = f"{poc_price:.4f}" if poc_price is not None else "N/A"
                     of_line = format_of_line(of, owfah)
                     
                     message = (
@@ -1525,7 +1524,7 @@ async def scan_binance_futures(first_run=False):
                         f"Volume: ${volume:,.0f}\n"
                         f"Entry Signal: Consider {signal}\n"
                         f"VWAP: {vwap_str}\n"
-                        f"SVP (Vol Profile): {svp_str}\n"
+                        f"POC (Vol Profile): {poc_str}\n"
                         f"{of_line}\n\n"
                         f"========================"
                     )
@@ -1543,13 +1542,13 @@ async def scan_binance_futures(first_run=False):
                 ma_price = of.get('max_ask_price', 0.0)
                 
                 # Record highest and reoccurring liquidity walls ONLY if close to SVP (within 0.5%)
-                if mb_vol > 50 and svp_price is not None:
-                    if abs(mb_price - svp_price) / svp_price < 0.005:
+                if mb_vol > 50 and poc_price is not None:
+                    if abs(mb_price - poc_price) / poc_price < 0.005:
                         if mb_vol > BTC_WATCHLIST["highest_bid_wall"]["vol"]:
                             BTC_WATCHLIST["highest_bid_wall"] = {"price": mb_price, "vol": mb_vol}
                             
-                if ma_vol > 50 and svp_price is not None:
-                    if abs(ma_price - svp_price) / svp_price < 0.005:
+                if ma_vol > 50 and poc_price is not None:
+                    if abs(ma_price - poc_price) / poc_price < 0.005:
                         if ma_vol > BTC_WATCHLIST["highest_ask_wall"]["vol"]:
                             BTC_WATCHLIST["highest_ask_wall"] = {"price": ma_price, "vol": ma_vol}
                 
