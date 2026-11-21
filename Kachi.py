@@ -18,7 +18,7 @@ TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
 
 GATEIO_TICKERS = "https://api.gateio.ws/api/v4/spot/tickers"
 MEXC_TICKERS = "https://api.mexc.com/api/v3/ticker/24hr"
-CMC_LISTINGS = "https://api.coinmarketcap.com/v1/cryptocurrency/listings/latest" # Standardized endpoint
+CMC_LISTINGS = "https://api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
 GATEIO_MIN_VOLUME = 5_000_000
 MEXC_MIN_VOLUME = 5_000_000
@@ -37,7 +37,7 @@ MEXC_FUTURES_TICKERS = "https://contract.mexc.com/api/v1/contract/ticker"
 FUTURES_MIN_VOLUME = 10_000_000
 FUTURES_PRICE_CHANGE_THRESHOLD = 5
 
-# Kline config (Increased for historical calculations)
+# Kline config
 KLINE_INTERVAL = "5m"
 MEXC_KLINE_INTERVAL = "Min5"
 KLINE_LIMIT = 200
@@ -57,7 +57,7 @@ BIG_COINS = ["BTC", "ETH", "SOL"]
 BIG_COIN_PRICE_THRESHOLD = 2
 
 # OWFAH / Order Flow Config
-CONFLUENCE_THRESHOLD = 3  # Need at least 3 out of 5 factors
+CONFLUENCE_THRESHOLD = 3
 SVP_ATR_MULT = 0.25
 PROXIMITY_ATR_MULT = 0.25
 INVALIDATION_BUY = 1.0015
@@ -98,8 +98,6 @@ BTC_WATCHLIST = {
     "highest_bid_wall": {"price": 0.0, "vol": 0.0},
     "highest_ask_wall": {"price": 0.0, "vol": 0.0}
 }
-
-WALL_TRACKER = {}  # Tracks wall persistence {symbol: {side: {'price': p, 'vol': v, 'timestamp': t}}}
 
 # =========================
 # TRADINGVIEW URL HELPER
@@ -147,7 +145,6 @@ def calculate_vwap_bands(highs, lows, closes, volumes):
     variance = sum(v * (tp - vwap)**2 for tp, v in zip(typical_prices, volumes)) / sum(volumes)
     std_dev = math.sqrt(variance)
     
-    # Slope calculation (last 5 bars)
     slope = 0.0
     if len(typical_prices) >= 5:
         slope = typical_prices[-1] - typical_prices[-5]
@@ -157,7 +154,6 @@ def calculate_vwap_bands(highs, lows, closes, volumes):
 def calculate_poc_va(highs, lows, closes, volumes):
     if not volumes or len(volumes) != len(closes):
         return None, None, None
-    # Simple binning for POC/VA
     bins = {}
     for h, l, c, v in zip(highs, lows, closes, volumes):
         tp = (h + l + c) / 3
@@ -223,7 +219,7 @@ def calculate_cvd_divergence(closes, cvd_changes):
 
 def calculate_dynamic_d_vol(deltas, volumes, current_idx):
     if len(deltas) < 200 or len(volumes) < 200:
-        return 25.0 # fallback
+        return 25.0
     ratios = []
     for i in range(max(0, current_idx-200), current_idx):
         if volumes[i] > 0:
@@ -911,12 +907,9 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price):
             poc_short_passed = True
 
     # 5. CVD Divergence
-    cvd_changes = deltas[-20:] # simplified cvd change proxy using delta
+    cvd_changes = deltas[-20:]
     cvd_divergence = calculate_cvd_divergence(klines["closes"], cvd_changes)
 
-    # Wall/SVP check happens in the scanner loop, this function handles the other 4
-    # We will assemble the confluence score in the scanner, but for now, let's return the core signal
-    
     # Determine direction (Aggression + Absorption)
     long_signal = long_delta_passed and footprint > 0.2
     short_signal = short_delta_passed and footprint < -0.2
@@ -957,7 +950,7 @@ async def scan_gateio_futures(first_run=False):
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
-            # Z-Score check (simplified since we don't have 200 ticker histories, using fixed threshold for now)
+            # Step 1: Is something abnormal happening?
             trigger = meets_threshold and abs(price_change) >= threshold
             if not trigger: continue
             
@@ -967,17 +960,14 @@ async def scan_gateio_futures(first_run=False):
             of = await fetch_gateio_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
             
-            # Check Walls with Persistence & SVP
+            # Step 2: Is price at a meaningful level?
             mb_vol, mb_price, ma_vol, ma_price = of['max_bid_vol'], of['max_bid_price'], of['max_ask_vol'], of['max_ask_price']
-            # Determine if major for imbalance
             is_major = base in BIG_COINS
             stacked_bid, stacked_ask = detect_stacked_imbalance(of['bids'], of['asks'], is_major)
             
-            # Confluence Score calculation
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price)
             atr = res['atr']
             
-            # SVP/Wall Factor
             poc, vah, val = calculate_poc_va(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
             svp_dist = 0.25 * atr
             wall_long = False
@@ -991,6 +981,7 @@ async def scan_gateio_futures(first_run=False):
                 if abs(ma_price - poc) <= svp_dist:
                     wall_short = True
 
+            # Step 3 & 4: Who is aggressive, are they absorbed, should we alert?
             score = 0
             details = []
             if res['signal'] == "LONG":
@@ -1006,7 +997,6 @@ async def scan_gateio_futures(first_run=False):
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
-            # Aggression + Absorption is mandatory, so we need at least 3 score
             if score >= 3:
                 signal = res['signal'].capitalize()
                 vwap_str = f"{calculate_vwap_bands(klines['highs'], klines['lows'], klines['closes'], klines['volumes'])[0]:.4f}"
@@ -1018,7 +1008,7 @@ async def scan_gateio_futures(first_run=False):
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
-                    f"Volume Growth: {volume:,.0f}\n"
+                    f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n"
                     f"VWAP: {vwap_str}\n"
                     f"POC (Vol Profile): {poc_str}\n"
@@ -1095,7 +1085,7 @@ async def scan_mexc_futures(first_run=False):
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
-                    f"Volume Growth: {volume:,.0f}\n"
+                    f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n"
                     f"VWAP: {vwap_str}\n"
                     f"POC (Vol Profile): {poc_str}\n"
@@ -1124,6 +1114,7 @@ async def scan_binance_futures(first_run=False):
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
+            # Step 1: Is something abnormal happening?
             trigger = meets_threshold and abs(price_change) >= threshold
             if not trigger: continue
                 
@@ -1145,6 +1136,7 @@ async def scan_binance_futures(first_run=False):
             wall_long = abs(mb_price - poc) <= svp_dist if mb_price and poc else False
             wall_short = abs(ma_price - poc) <= svp_dist if ma_price and poc else False
 
+            # Step 3 & 4: Who is aggressive, are they absorbed, should we alert?
             score = 0
             details = []
             if res['signal'] == "LONG":
@@ -1171,7 +1163,7 @@ async def scan_binance_futures(first_run=False):
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
-                    f"Volume Growth: {volume:,.0f}\n"
+                    f"Volume: ${volume:,.0f}\n"
                     f"Entry Signal: Consider {signal}\n"
                     f"VWAP: {vwap_str}\n"
                     f"POC (Vol Profile): {poc_str}\n"
@@ -1180,7 +1172,7 @@ async def scan_binance_futures(first_run=False):
                 )
                 await send_telegram(message, "binance", symbol, tradingview_url("binance_fut", symbol))
                 
-            # BTC Watchlist Logic
+            # BTC Watchlist Logic (Invalidation & Absorption)
             if symbol == "BTCUSDT":
                 if mb_price and poc and abs(mb_price - poc) <= svp_dist:
                     if mb_vol > 50 and mb_vol > BTC_WATCHLIST["highest_bid_wall"]["vol"]:
@@ -1192,7 +1184,7 @@ async def scan_binance_futures(first_run=False):
                 bid_wall_price = BTC_WATCHLIST["highest_bid_wall"]["price"]
                 ask_wall_price = BTC_WATCHLIST["highest_ask_wall"]["price"]
                 
-                # Invalidation logic
+                # Invalidation logic: if price crosses the wall by 0.15% or is within 0.25 ATR, we check for reaction
                 if bid_wall_price > 0 and (current_price > bid_wall_price * 1.0015 or abs(current_price - bid_wall_price) < atr * 0.25):
                     if res['signal'] == 'LONG' and res['d_vol_passed']:
                         of_line = format_of_line(of, 3, "Wall, D.Vol, Aggression")
