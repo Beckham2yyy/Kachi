@@ -154,26 +154,36 @@ def calculate_vwap_bands(highs, lows, closes, volumes):
 def calculate_poc_va(highs, lows, closes, volumes):
     if not volumes or len(volumes) != len(closes):
         return None, None, None
+        
+    min_p = min(lows)
+    max_p = max(highs)
+    if max_p - min_p == 0:
+        return closes[-1], closes[-1], closes[-1]
+        
+    num_bins = 50
+    bin_size = (max_p - min_p) / num_bins
     bins = {}
-    for h, l, c, v in zip(highs, lows, closes, volumes):
-        tp = (h + l + c) / 3
-        rounded_tp = round(tp, 4)
-        bins[rounded_tp] = bins.get(rounded_tp, 0) + v
     
+    for h, l, c, v in zip(highs, lows, closes, volumes):
+        bin_idx = int((c - min_p) / bin_size)
+        bin_idx = max(0, min(bin_idx, num_bins - 1))
+        bins[bin_idx] = bins.get(bin_idx, 0) + v
+        
     if not bins:
         return None, None, None
         
     sorted_bins = sorted(bins.items(), key=lambda x: x[1], reverse=True)
-    poc = sorted_bins[0][0]
+    poc_idx = sorted_bins[0][0]
+    poc = min_p + (poc_idx + 0.5) * bin_size
     
     total_vol = sum(bins.values())
     target_vol = total_vol * 0.70
     current_vol = 0
     va_prices = []
     
-    for price, vol in sorted_bins:
+    for idx, vol in sorted_bins:
         current_vol += vol
-        va_prices.append(price)
+        va_prices.append(min_p + (idx + 0.5) * bin_size)
         if current_vol >= target_vol:
             break
             
@@ -184,36 +194,35 @@ def calculate_poc_va(highs, lows, closes, volumes):
     val = min(va_prices)
     return poc, vah, val
 
-def detect_stacked_imbalance(bids, asks, is_major):
-    ratio_threshold = 3.0 if is_major else 4.0
-    stacked_bid = 0
-    stacked_ask = 0
+def detect_liquidity_wall(bids, asks):
+    bid_vols = [abs(float(b[1])) for b in bids if len(b) >= 2]
+    ask_vols = [abs(float(a[1])) for a in asks if len(a) >= 2]
+    all_vols = bid_vols + ask_vols
     
-    for i in range(min(5, len(bids) - 1)):
-        b1 = float(bids[i][1])
-        b2 = float(bids[i+1][1])
-        if b1 > 0 and b2 > 0:
-            if b1 >= b2 * ratio_threshold or b2 >= b1 * ratio_threshold:
-                stacked_bid += 1
-                
-    for i in range(min(5, len(asks) - 1)):
-        a1 = float(asks[i][1])
-        a2 = float(asks[i+1][1])
-        if a1 > 0 and a2 > 0:
-            if a1 >= a2 * ratio_threshold or a2 >= a1 * ratio_threshold:
-                stacked_ask += 1
-                
-    return stacked_bid >= 3, stacked_ask >= 3
+    if not all_vols:
+        return False, False, 0, 0, 0, 0
+        
+    median_vol = statistics.median(all_vols)
+    
+    max_bid_vol = max(bid_vols) if bid_vols else 0
+    max_ask_vol = max(ask_vols) if ask_vols else 0
+    
+    max_bid_price = float(bids[bid_vols.index(max_bid_vol)][0]) if bid_vols else 0
+    max_ask_price = float(asks[ask_vols.index(max_ask_vol)][0]) if ask_vols else 0
+    
+    bid_wall = max_bid_vol > 5 * median_vol and max_bid_vol * max_bid_price > 50000
+    ask_wall = max_ask_vol > 5 * median_vol and max_ask_vol * max_ask_price > 50000
+    
+    return bid_wall, ask_wall, max_bid_vol, max_bid_price, max_ask_vol, max_ask_price
 
-def calculate_cvd_divergence(closes, cvd_changes):
-    if len(closes) < 20 or len(cvd_changes) < 20:
+def calculate_cvd_divergence(closes, deltas):
+    if len(closes) < 20:
         return False
     price_up = closes[-1] > closes[-20]
-    cvd_down = sum(cvd_changes[-20:]) < 0
+    cvd_sum = sum(deltas[-20:])
     price_down = closes[-1] < closes[-20]
-    cvd_up = sum(cvd_changes[-20:]) > 0
     
-    if (price_up and cvd_down) or (price_down and cvd_up):
+    if (price_up and cvd_sum < 0) or (price_down and cvd_sum > 0):
         return True
     return False
 
@@ -858,75 +867,62 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
 
 def calculate_owfah(deltas, volumes, footprint, klines, current_price):
     if len(deltas) < 20 or len(volumes) < 20:
-        return {'signal': None, 'max_delta': 0.0, 'min_delta': 0.0, 'delta_vol_pct': 0.0, 'score': 0, 'details': ''}
+        return {'score': 0, 'details': 'Insufficient Data', 'atr': 0, 'max_delta': 0, 'min_delta': 0, 'delta_vol_pct': 0, 'vwap_val': 0, 'poc_val': 0}
     
-    max_delta = max(deltas)
-    min_delta = min(deltas)
+    max_delta = max(deltas[-20:])
+    min_delta = min(deltas[-20:])
     curr_delta = deltas[-1]
     prev_delta = deltas[-2]
     prev_vol = volumes[-2]
-    avg_vol = sum(volumes) / len(volumes) if volumes else 1.0
+    avg_vol = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 1.0
     
-    # 1. Dynamic D-Volume Threshold (Top 10% of last 200 bars)
     delta_vol_pct = (abs(prev_delta) / prev_vol * 100) if prev_vol > 0 else 0.0
     d_vol_threshold = calculate_dynamic_d_vol(deltas, volumes, len(deltas)-1)
     d_vol_passed = delta_vol_pct >= d_vol_threshold
     
-    # 2. Delta/Footprint Aggression
-    long_delta_passed = (curr_delta >= max_delta * 0.9) and (min_delta >= -0.10 * avg_vol)
-    short_delta_passed = (curr_delta <= min_delta * 0.9) and (max_delta <= 0.10 * avg_vol)
+    long_delta = (curr_delta >= max_delta * 0.9) and (min_delta >= -0.10 * avg_vol)
+    short_delta = (curr_delta <= min_delta * 0.9) and (max_delta <= 0.10 * avg_vol)
     
-    # ATR calculation
+    delta_footprint_long = d_vol_passed and long_delta and footprint > 0.1
+    delta_footprint_short = d_vol_passed and short_delta and footprint < -0.1
+    
     atr = calculate_atr(klines["highs"], klines["lows"], klines["closes"], ATR_PERIOD)
     
-    # 3. VWAP Position & Bands
     vwap, std_dev, slope, typical_prices = calculate_vwap_bands(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-    vwap_long_passed = False
-    vwap_short_passed = False
+    vwap_long = False
+    vwap_short = False
     if vwap and std_dev > 0:
-        # Long bias: VWAP slope > 0, price between VWAP and -1 sigma, or reclaiming
-        if slope > 0 and (vwap - std_dev <= current_price <= vwap or (typical_prices[-2] < vwap - std_dev and current_price > vwap)):
-            vwap_long_passed = True
-        # Short bias: VWAP slope < 0, price between VWAP and +1 sigma, or rejecting
-        if slope < 0 and (vwap <= current_price <= vwap + std_dev or (typical_prices[-2] > vwap + std_dev and current_price < vwap)):
-            vwap_short_passed = True
+        if slope > 0 and (vwap - std_dev <= current_price <= vwap * 1.01):
+            vwap_long = True
+        if slope < 0 and (vwap * 0.99 <= current_price <= vwap + std_dev):
+            vwap_short = True
             
-    # 4. POC / VA Level
     poc, vah, val = calculate_poc_va(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
-    poc_long_passed = False
-    poc_short_passed = False
+    poc_long = False
+    poc_short = False
     if poc:
         poc_dist = 0.25 * atr
-        # Long: price near POC/VAH/VAL, and POC is rising
-        poc_rising = typical_prices[-1] > typical_prices[-5]
-        if poc_rising and (abs(current_price - poc) <= poc_dist or abs(current_price - vah) <= poc_dist or abs(current_price - val) <= poc_dist):
-            poc_long_passed = True
-        # Short: price near POC/VAH/VAL, and POC is falling
-        poc_falling = typical_prices[-1] < typical_prices[-5]
-        if poc_falling and (abs(current_price - poc) <= poc_dist or abs(current_price - vah) <= poc_dist or abs(current_price - val) <= poc_dist):
-            poc_short_passed = True
-
-    # 5. CVD Divergence
-    cvd_changes = deltas[-20:]
-    cvd_divergence = calculate_cvd_divergence(klines["closes"], cvd_changes)
-
-    # Determine direction (Aggression + Absorption)
-    long_signal = long_delta_passed and footprint > 0.2
-    short_signal = short_delta_passed and footprint < -0.2
-
-    signal = "LONG" if long_signal else ("SHORT" if short_signal else None)
+        if typical_prices[-1] > typical_prices[-5] and any(abs(current_price - x) <= poc_dist for x in (poc, vah, val)):
+            poc_long = True
+        if typical_prices[-1] < typical_prices[-5] and any(abs(current_price - x) <= poc_dist for x in (poc, vah, val)):
+            poc_short = True
+            
+    cvd_div = calculate_cvd_divergence(klines["closes"], deltas)
+    
     return {
-        'signal': signal, 
-        'max_delta': max_delta, 
-        'min_delta': min_delta, 
+        'delta_footprint_long': delta_footprint_long,
+        'delta_footprint_short': delta_footprint_short,
+        'vwap_long': vwap_long,
+        'vwap_short': vwap_short,
+        'poc_long': poc_long,
+        'poc_short': poc_short,
+        'cvd_div': cvd_div,
+        'max_delta': max_delta,
+        'min_delta': min_delta,
         'delta_vol_pct': delta_vol_pct,
-        'd_vol_passed': d_vol_passed,
-        'vwap_long': vwap_long_passed,
-        'vwap_short': vwap_short_passed,
-        'poc_long': poc_long_passed,
-        'poc_short': poc_short_passed,
-        'cvd_div': cvd_divergence,
-        'atr': atr
+        'atr': atr,
+        'poc_val': poc,
+        'vwap_val': vwap
     }
 
 # =========================
@@ -944,62 +940,61 @@ async def scan_gateio_futures(first_run=False):
             symbol = item["contract"]
             if not symbol.endswith("_USDT"): continue
             base = symbol.split("_")[0]
-            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("volume_24h_quote", 0))
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
             # Step 1: Is something abnormal happening?
-            trigger = meets_threshold and abs(price_change) >= threshold
+            trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
             
             klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio(), limit=200)
-            if not klines or len(klines["closes"]) < 200: continue
+            if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_gateio_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
+            bids, asks = of['bids'], of['asks']
             
             # Step 2: Is price at a meaningful level?
             mb_vol, mb_price, ma_vol, ma_price = of['max_bid_vol'], of['max_bid_price'], of['max_ask_vol'], of['max_ask_price']
-            is_major = base in BIG_COINS
-            stacked_bid, stacked_ask = detect_stacked_imbalance(of['bids'], of['asks'], is_major)
+            bid_wall, ask_wall, mb_vol, mb_price, ma_vol, ma_price = detect_liquidity_wall(bids, asks)
             
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price)
             atr = res['atr']
             
-            poc, vah, val = calculate_poc_va(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = res['poc_val']
             svp_dist = 0.25 * atr
             wall_long = False
             wall_short = False
             
-            if mb_price and poc:
+            if mb_price and poc and bid_wall:
                 if abs(mb_price - poc) <= svp_dist:
                     wall_long = True
             
-            if ma_price and poc:
+            if ma_price and poc and ask_wall:
                 if abs(ma_price - poc) <= svp_dist:
                     wall_short = True
 
             # Step 3 & 4: Who is aggressive, are they absorbed, should we alert?
             score = 0
             details = []
-            if res['signal'] == "LONG":
-                if wall_long or stacked_bid: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint > 0.2: score += 1; details.append("D.Vol")
+            if res['delta_footprint_long']:
+                score += 1; details.append("Delta/FP")
+                if wall_long: score += 1; details.append("Wall")
                 if res['vwap_long']: score += 1; details.append("VWAP")
                 if res['poc_long']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
-            elif res['signal'] == "SHORT":
-                if wall_short or stacked_ask: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint < -0.2: score += 1; details.append("D.Vol")
+            elif res['delta_footprint_short']:
+                score += 1; details.append("Delta/FP")
+                if wall_short: score += 1; details.append("Wall")
                 if res['vwap_short']: score += 1; details.append("VWAP")
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
             if score >= 3:
-                signal = res['signal'].capitalize()
-                vwap_str = f"{calculate_vwap_bands(klines['highs'], klines['lows'], klines['closes'], klines['volumes'])[0]:.4f}"
+                signal = "LONG" if res['delta_footprint_long'] else "SHORT"
+                vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
@@ -1032,51 +1027,49 @@ async def scan_mexc_futures(first_run=False):
             symbol = item.get("symbol")
             if not symbol.endswith("USDT"): continue
             base = symbol.split("_")[0]
-            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else FUTURES_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("amount24", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("riseFallRate", 0)) * 100
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
-            trigger = meets_threshold and abs(price_change) >= threshold
+            trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
                 
             klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc(), limit=200)
-            if not klines or len(klines["closes"]) < 200: continue
+            if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_mexc_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
+            bids, asks = of['bids'], of['asks']
             
-            mb_vol, mb_price, ma_vol, ma_price = of['max_bid_vol'], of['max_bid_price'], of['max_ask_vol'], of['max_ask_price']
-            is_major = base in BIG_COINS
-            stacked_bid, stacked_ask = detect_stacked_imbalance(of['bids'], of['asks'], is_major)
+            bid_wall, ask_wall, mb_vol, mb_price, ma_vol, ma_price = detect_liquidity_wall(bids, asks)
             
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price)
             atr = res['atr']
             
-            poc, vah, val = calculate_poc_va(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = res['poc_val']
             svp_dist = 0.25 * atr
-            wall_long = abs(mb_price - poc) <= svp_dist if mb_price and poc else False
-            wall_short = abs(ma_price - poc) <= svp_dist if ma_price and poc else False
+            wall_long = abs(mb_price - poc) <= svp_dist if mb_price and poc and bid_wall else False
+            wall_short = abs(ma_price - poc) <= svp_dist if ma_price and poc and ask_wall else False
 
             score = 0
             details = []
-            if res['signal'] == "LONG":
-                if wall_long or stacked_bid: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint > 0.2: score += 1; details.append("D.Vol")
+            if res['delta_footprint_long']:
+                score += 1; details.append("Delta/FP")
+                if wall_long: score += 1; details.append("Wall")
                 if res['vwap_long']: score += 1; details.append("VWAP")
                 if res['poc_long']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
-            elif res['signal'] == "SHORT":
-                if wall_short or stacked_ask: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint < -0.2: score += 1; details.append("D.Vol")
+            elif res['delta_footprint_short']:
+                score += 1; details.append("Delta/FP")
+                if wall_short: score += 1; details.append("Wall")
                 if res['vwap_short']: score += 1; details.append("VWAP")
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
             if score >= 3:
-                signal = res['signal'].capitalize()
-                vwap_str = f"{calculate_vwap_bands(klines['highs'], klines['lows'], klines['closes'], klines['volumes'])[0]:.4f}"
+                signal = "LONG" if res['delta_footprint_long'] else "SHORT"
+                vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
@@ -1108,53 +1101,51 @@ async def scan_binance_futures(first_run=False):
             symbol = item["symbol"]
             if not symbol.endswith("USDT"): continue
             base = symbol[:-4]
-            threshold = BIG_COIN_PRICE_THRESHOLD if base in BIG_COINS else BINANCE_PRICE_CHANGE_THRESHOLD
             volume = float(item.get("quoteVolume", 0))
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
             # Step 1: Is something abnormal happening?
-            trigger = meets_threshold and abs(price_change) >= threshold
+            trigger = meets_threshold and abs(price_change) >= BINANCE_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
                 
             klines = await fetch_binance_klines(symbol, interval=get_tf_binance(), limit=200)
-            if not klines or len(klines["closes"]) < 200: continue
+            if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_binance_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
+            bids, asks = of['bids'], of['asks']
             
-            mb_vol, mb_price, ma_vol, ma_price = of['max_bid_vol'], of['max_bid_price'], of['max_ask_vol'], of['max_ask_price']
-            is_major = base in BIG_COINS
-            stacked_bid, stacked_ask = detect_stacked_imbalance(of['bids'], of['asks'], is_major)
+            bid_wall, ask_wall, mb_vol, mb_price, ma_vol, ma_price = detect_liquidity_wall(bids, asks)
             
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price)
             atr = res['atr']
             
-            poc, vah, val = calculate_poc_va(klines["highs"], klines["lows"], klines["closes"], klines["volumes"])
+            poc = res['poc_val']
             svp_dist = 0.25 * atr
-            wall_long = abs(mb_price - poc) <= svp_dist if mb_price and poc else False
-            wall_short = abs(ma_price - poc) <= svp_dist if ma_price and poc else False
+            wall_long = abs(mb_price - poc) <= svp_dist if mb_price and poc and bid_wall else False
+            wall_short = abs(ma_price - poc) <= svp_dist if ma_price and poc and ask_wall else False
 
             # Step 3 & 4: Who is aggressive, are they absorbed, should we alert?
             score = 0
             details = []
-            if res['signal'] == "LONG":
-                if wall_long or stacked_bid: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint > 0.2: score += 1; details.append("D.Vol")
+            if res['delta_footprint_long']:
+                score += 1; details.append("Delta/FP")
+                if wall_long: score += 1; details.append("Wall")
                 if res['vwap_long']: score += 1; details.append("VWAP")
                 if res['poc_long']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
-            elif res['signal'] == "SHORT":
-                if wall_short or stacked_ask: score += 1; details.append("Wall")
-                if res['d_vol_passed'] and footprint < -0.2: score += 1; details.append("D.Vol")
+            elif res['delta_footprint_short']:
+                score += 1; details.append("Delta/FP")
+                if wall_short: score += 1; details.append("Wall")
                 if res['vwap_short']: score += 1; details.append("VWAP")
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
             if score >= 3:
-                signal = res['signal'].capitalize()
-                vwap_str = f"{calculate_vwap_bands(klines['highs'], klines['lows'], klines['closes'], klines['volumes'])[0]:.4f}"
+                signal = "LONG" if res['delta_footprint_long'] else "SHORT"
+                vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
@@ -1184,10 +1175,9 @@ async def scan_binance_futures(first_run=False):
                 bid_wall_price = BTC_WATCHLIST["highest_bid_wall"]["price"]
                 ask_wall_price = BTC_WATCHLIST["highest_ask_wall"]["price"]
                 
-                # Invalidation logic: if price crosses the wall by 0.15% or is within 0.25 ATR, we check for reaction
                 if bid_wall_price > 0 and (current_price > bid_wall_price * 1.0015 or abs(current_price - bid_wall_price) < atr * 0.25):
-                    if res['signal'] == 'LONG' and res['d_vol_passed']:
-                        of_line = format_of_line(of, 3, "Wall, D.Vol, Aggression")
+                    if res['delta_footprint_long']:
+                        of_line = format_of_line(of, 3, "Wall, Delta/FP, Aggression")
                         message = (
                             f"🚨 OWFAH/2 BTC WALL BOUNCE\n\n"
                             f"Reached Bid Wall at {bid_wall_price:.2f}\n"
@@ -1200,8 +1190,8 @@ async def scan_binance_futures(first_run=False):
                         BTC_WATCHLIST["highest_bid_wall"] = {"price": 0.0, "vol": 0.0}
                         
                 if ask_wall_price > 0 and (current_price < ask_wall_price * 0.9985 or abs(current_price - ask_wall_price) < atr * 0.25):
-                    if res['signal'] == 'SHORT' and res['d_vol_passed']:
-                        of_line = format_of_line(of, 3, "Wall, D.Vol, Aggression")
+                    if res['delta_footprint_short']:
+                        of_line = format_of_line(of, 3, "Wall, Delta/FP, Aggression")
                         message = (
                             f"🚨 OWFAH/2 BTC WALL REJECTION\n\n"
                             f"Reached Ask Wall at {ask_wall_price:.2f}\n"
