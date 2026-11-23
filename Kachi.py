@@ -12,6 +12,9 @@ import statistics
 # CONFIG
 # =========================
 
+# SET TO True TO FLOOD TELEGRAM AND TEST, SET TO False TO RESUME NORMAL SNIPING
+TEST_MODE = True 
+
 CMC_API_KEY = "8a6ea4b9c73c45e8adac9e14f214f087"
 TELEGRAM_BOT_TOKEN = "8703361353:AAFZoJu8UWVLxsuSwSzzeQ-9cPHnUIH6QSQ"
 TELEGRAM_CHAT_IDS = ["7198809557", "6065933220"]
@@ -867,7 +870,7 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
 
 def calculate_owfah(deltas, volumes, footprint, klines, current_price):
     if len(deltas) < 20 or len(volumes) < 20:
-        return {'score': 0, 'details': 'Insufficient Data', 'atr': 0, 'max_delta': 0, 'min_delta': 0, 'delta_vol_pct': 0, 'vwap_val': 0, 'poc_val': 0}
+        return {'score': 0, 'details': 'Insufficient Data', 'atr': 0, 'max_delta': 0, 'min_delta': 0, 'delta_vol_pct': 0, 'vwap_val': 0, 'poc_val': 0, 'delta_footprint_long': False, 'delta_footprint_short': False, 'vwap_long': False, 'vwap_short': False, 'poc_long': False, 'poc_short': False, 'cvd_div': False}
     
     max_delta = max(deltas[-20:])
     min_delta = min(deltas[-20:])
@@ -945,9 +948,9 @@ async def scan_gateio_futures(first_run=False):
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
-            # Step 1: Is something abnormal happening?
+            # Step 1: Is something abnormal happening? (Skipped if TEST_MODE)
             trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
-            if not trigger: continue
+            if not TEST_MODE and not trigger: continue
             
             klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio(), limit=200)
             if not klines or len(klines["closes"]) < 20: continue
@@ -976,7 +979,7 @@ async def scan_gateio_futures(first_run=False):
                 if abs(ma_price - poc) <= svp_dist:
                     wall_short = True
 
-            # Step 3 & 4: Who is aggressive, are they absorbed, should we alert?
+            # Step 3 & 4: Who is aggressive, are they absorbed, should we alert? (Skipped if TEST_MODE)
             score = 0
             details = []
             if res['delta_footprint_long']:
@@ -992,14 +995,16 @@ async def scan_gateio_futures(first_run=False):
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
-            if score >= 3:
+            if TEST_MODE or score >= 3:
                 signal = "LONG" if res['delta_footprint_long'] else "SHORT"
                 vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
+                prefix = "🚨 [TEST MODE] " if TEST_MODE else "🚨 "
+                
                 message = (
-                    f"🚨 GATE.IO FUTURES OWFAH/2 ALERT\n\n"
+                    f"{prefix}GATE.IO FUTURES ALERT\n\n"
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
@@ -1033,7 +1038,7 @@ async def scan_mexc_futures(first_run=False):
             meets_threshold = volume >= FUTURES_MIN_VOLUME
             
             trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
-            if not trigger: continue
+            if not TEST_MODE and not trigger: continue
                 
             klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc(), limit=200)
             if not klines or len(klines["closes"]) < 20: continue
@@ -1067,14 +1072,16 @@ async def scan_mexc_futures(first_run=False):
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
-            if score >= 3:
+            if TEST_MODE or score >= 3:
                 signal = "LONG" if res['delta_footprint_long'] else "SHORT"
                 vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
+                prefix = "🚨 [TEST MODE] " if TEST_MODE else "🚨 "
+                
                 message = (
-                    f"🚨 MEXC FUTURES OWFAH/2 ALERT\n\n"
+                    f"{prefix}MEXC FUTURES ALERT\n\n"
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
@@ -1108,7 +1115,7 @@ async def scan_binance_futures(first_run=False):
             
             # Step 1: Is something abnormal happening?
             trigger = meets_threshold and abs(price_change) >= BINANCE_PRICE_CHANGE_THRESHOLD
-            if not trigger: continue
+            if not TEST_MODE and not trigger: continue
                 
             klines = await fetch_binance_klines(symbol, interval=get_tf_binance(), limit=200)
             if not klines or len(klines["closes"]) < 20: continue
@@ -1143,14 +1150,16 @@ async def scan_binance_futures(first_run=False):
                 if res['poc_short']: score += 1; details.append("POC")
                 if res['cvd_div']: score += 1; details.append("CVD")
 
-            if score >= 3:
+            if TEST_MODE or score >= 3:
                 signal = "LONG" if res['delta_footprint_long'] else "SHORT"
                 vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{poc:.4f}" if poc else "N/A"
                 of_line = format_of_line(of, score, ", ".join(details))
                 
+                prefix = "🚨 [TEST MODE] " if TEST_MODE else "🚨 "
+                
                 message = (
-                    f"🚨 BINANCE FUTURES OWFAH/2 ALERT\n\n"
+                    f"{prefix}BINANCE FUTURES ALERT\n\n"
                     f"Contract: {symbol}\n"
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
@@ -1212,8 +1221,9 @@ async def scan_binance_futures(first_run=False):
 # =========================
 
 async def main():
-    print("Starting Owfah/2...")
-    await send_telegram(f"Sniping 🍁\nBot: Owfah/2\n⏱ Timeframe: {CURRENT_TIMEFRAME}\n\nSend /timeframe to change.\nSend /settings to choose exchanges.\nSend /watchlist to view active alerts.")
+    print(f"Starting Owfah/2... (TEST MODE: {TEST_MODE})")
+    mode_str = "TEST MODE (FLOODING)" if TEST_MODE else "NORMAL SNIPING"
+    await send_telegram(f"Sniping 🍁\nBot: Owfah/2\nMode: {mode_str}\n⏱ Timeframe: {CURRENT_TIMEFRAME}\n\nSend /timeframe to change.\nSend /settings to choose exchanges.\nSend /watchlist to view active alerts.")
     asyncio.create_task(binance_ws_manager())
     asyncio.create_task(poll_telegram())
     
