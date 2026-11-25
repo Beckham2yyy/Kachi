@@ -40,15 +40,12 @@ FUTURES_PRICE_CHANGE_THRESHOLD = 5
 # Kline config
 KLINE_INTERVAL = "5m"
 MEXC_KLINE_INTERVAL = "Min5"
-KLINE_LIMIT = 200
 ATR_PERIOD = 14
-LOOKBACK_200 = 200
 
 # Binance Futures config
 BINANCE_FUTURES_TICKERS = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 BINANCE_KLINE_INTERVAL = "5m"
-BINANCE_KLINE_LIMIT = 200
 BINANCE_WS_BASE = "wss://fstream.binance.com/stream?streams="
 BINANCE_PRICE_CHANGE_THRESHOLD = 1.5
 BINANCE_VOLUME_SPIKE_PERCENT = 12
@@ -58,8 +55,6 @@ BIG_COIN_PRICE_THRESHOLD = 2
 
 # OWFAH / Order Flow Config
 CONFLUENCE_THRESHOLD = 3
-SVP_ATR_MULT = 0.25
-PROXIMITY_ATR_MULT = 0.25
 INVALIDATION_BUY = 1.0015
 INVALIDATION_SELL = 0.9985
 
@@ -81,14 +76,28 @@ TIMEFRAME_MAP = {
     "1M":  {"gateio": "30d", "mexc": "Month1","binance": "1M"},
 }
 
-def get_tf_gateio():
-    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["gateio"]
+# --- SCALING MAPS (the actual fix) ---
+LOOKBACK_MAP = {
+    "5m": 1000, "15m": 600, "30m": 400,
+    "1hr": 200, "4h": 200, "1d": 200, "1w": 200, "1M": 200,
+}
+ATR_MULT_MAP = {
+    "5m": 0.75, "15m": 0.50, "30m": 0.40,
+    "1hr": 0.25, "4h": 0.25, "1d": 0.25, "1w": 0.25, "1M": 0.25,
+}
+PROX_MULT_MAP = {
+    "5m": 1.00, "15m": 0.75, "30m": 0.60,
+    "1hr": 0.50, "4h": 0.50, "1d": 0.50, "1w": 0.50, "1M": 0.50,
+}
 
-def get_tf_mexc():
-    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["mexc"]
-
-def get_tf_binance():
-    return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["binance"]
+def get_tf_gateio(): return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["gateio"]
+def get_tf_mexc(): return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["mexc"]
+def get_tf_binance(): return TIMEFRAME_MAP[CURRENT_TIMEFRAME]["binance"]
+def get_lookback(): return LOOKBACK_MAP[CURRENT_TIMEFRAME]
+def get_atr_mult(): return ATR_MULT_MAP[CURRENT_TIMEFRAME]
+def get_prox_mult(): return PROX_MULT_MAP[CURRENT_TIMEFRAME]
+def get_max_delta_factor():
+    return 0.90 if CURRENT_TIMEFRAME in ("1hr", "4h", "1d", "1w", "1M") else 0.75
 
 # =========================
 # WALL TRACKER & WATCHLIST STATE
@@ -141,58 +150,45 @@ def calculate_vwap_bands(highs, lows, closes, volumes):
         return None, 0.0, 0.0, 0.0
     typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
     vwap = sum(tp * v for tp, v in zip(typical_prices, volumes)) / sum(volumes)
-    
     variance = sum(v * (tp - vwap)**2 for tp, v in zip(typical_prices, volumes)) / sum(volumes)
     std_dev = math.sqrt(variance)
-    
     slope = 0.0
     if len(typical_prices) >= 20:
-        # Slope lookback 20 bars as specified
         slope = typical_prices[-1] - typical_prices[-20]
     elif len(typical_prices) >= 5:
         slope = typical_prices[-1] - typical_prices[-5]
-        
     return vwap, std_dev, slope, typical_prices
 
 def calculate_poc_va(highs, lows, closes, volumes):
     if not volumes or len(volumes) != len(closes):
         return None, None, None
-        
     min_p = min(lows)
     max_p = max(highs)
     if max_p - min_p == 0:
         return closes[-1], closes[-1], closes[-1]
-        
     num_bins = 50
     bin_size = (max_p - min_p) / num_bins
     bins = {}
-    
     for h, l, c, v in zip(highs, lows, closes, volumes):
         bin_idx = int((c - min_p) / bin_size)
         bin_idx = max(0, min(bin_idx, num_bins - 1))
         bins[bin_idx] = bins.get(bin_idx, 0) + v
-        
     if not bins:
         return None, None, None
-        
     sorted_bins = sorted(bins.items(), key=lambda x: x[1], reverse=True)
     poc_idx = sorted_bins[0][0]
     poc = min_p + (poc_idx + 0.5) * bin_size
-    
     total_vol = sum(bins.values())
     target_vol = total_vol * 0.70
     current_vol = 0
     va_prices = []
-    
     for idx, vol in sorted_bins:
         current_vol += vol
         va_prices.append(min_p + (idx + 0.5) * bin_size)
         if current_vol >= target_vol:
             break
-            
     if not va_prices:
         return poc, poc, poc
-        
     vah = max(va_prices)
     val = min(va_prices)
     return poc, vah, val
@@ -201,22 +197,15 @@ def detect_liquidity_wall(bids, asks):
     bid_vols = [abs(float(b[1])) for b in bids if len(b) >= 2]
     ask_vols = [abs(float(a[1])) for a in asks if len(a) >= 2]
     all_vols = bid_vols + ask_vols
-    
     if not all_vols:
         return False, False, 0, 0, 0, 0
-        
     median_vol = statistics.median(all_vols)
-    
     max_bid_vol = max(bid_vols) if bid_vols else 0
     max_ask_vol = max(ask_vols) if ask_vols else 0
-    
     max_bid_price = float(bids[bid_vols.index(max_bid_vol)][0]) if bid_vols else 0
     max_ask_price = float(asks[ask_vols.index(max_ask_vol)][0]) if ask_vols else 0
-    
-    # Relative wall size >5× median order size (Top 20 levels already fetched)
     bid_wall = max_bid_vol > 5 * median_vol and max_bid_vol * max_bid_price > 50000
     ask_wall = max_ask_vol > 5 * median_vol and max_ask_vol * max_ask_price > 50000
-    
     return bid_wall, ask_wall, max_bid_vol, max_bid_price, max_ask_vol, max_ask_price
 
 def calculate_cvd_divergence(closes, deltas):
@@ -225,25 +214,23 @@ def calculate_cvd_divergence(closes, deltas):
     price_up = closes[-1] > closes[-20]
     price_down = closes[-1] < closes[-20]
     cvd_sum = sum(deltas[-20:])
-    # Normalized change approx
     avg_vol = sum(abs(d) for d in deltas[-20:]) / 20 if deltas else 1.0
     norm_change = abs(cvd_sum) / avg_vol if avg_vol > 0 else 0.0
-    
     divergence = (price_up and cvd_sum < 0) or (price_down and cvd_sum > 0)
-    expansion = norm_change >= 0.05  # 5%+ normalized
+    expansion = norm_change >= 0.05
     return divergence or expansion, norm_change
 
-def calculate_dynamic_d_vol(deltas, volumes, current_idx):
-    if len(deltas) < 200 or len(volumes) < 200:
+def calculate_dynamic_d_vol(deltas, volumes, current_idx, lookback=200):
+    if len(deltas) < lookback or len(volumes) < lookback:
         return 25.0
     ratios = []
-    for i in range(max(0, current_idx-200), current_idx):
+    for i in range(max(0, current_idx-lookback), current_idx):
         if volumes[i] > 0:
             ratios.append(abs(deltas[i]) / volumes[i] * 100)
     if not ratios:
         return 25.0
     ratios.sort()
-    threshold_idx = int(len(ratios) * 0.90)  # P90 = Top 10%
+    threshold_idx = int(len(ratios) * 0.90)
     return ratios[threshold_idx]
 
 def format_cvd(cvd):
@@ -267,14 +254,13 @@ def format_of_line(of, confluence_score, details):
     mb_price = of.get('max_bid_price', 0.0)
     ma_vol = of.get('max_ask_vol', 0.0)
     ma_price = of.get('max_ask_price', 0.0)
-    
     wall_str = f" │ Walls: B {mb_vol:.1f}@{mb_price:.4f} / A {ma_vol:.1f}@{ma_price:.4f}"
     base_str = f"📊 OF: FP {format_footprint(fp)} │ CVD {format_cvd(cvd)}{wall_str}"
     base_str += f"\n🎯 Confluence: {confluence_score}/5 ({details})"
     return base_str
 
 # =========================
-# API FETCHERS
+# API FETCHERS (unchanged)
 # =========================
 
 async def fetch_gateio_spot_orderflow(symbol):
@@ -569,7 +555,6 @@ async def send_telegram(message, exchange=None, symbol=None, chart_url=None):
                     row = cursor.fetchone()
                     enabled = row[0].split(',') if row else ['binance', 'gateio', 'mexc', 'cmc']
                     if exchange not in enabled: continue
-                
                 url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
                 payload = {"chat_id": chat_id, "text": message}
                 if chart_url:
@@ -652,7 +637,7 @@ async def handle_message(session, message):
                                     current_price = float(d.get("lastPrice", 0))
                                     price_change = float(d.get("priceChangePercent", 0))
                                     volume = float(d.get("quoteVolume", 0))
-                            klines = await fetch_binance_klines(sym, interval=get_tf_binance(), limit=200)
+                            klines = await fetch_binance_klines(sym, interval=get_tf_binance(), limit=get_lookback())
                             of_data = await fetch_binance_fut_orderflow(sym)
                         elif ex == "gateio":
                             g_sym = sym if "_" in sym else f"{sym[:-4]}_USDT"
@@ -663,7 +648,7 @@ async def handle_message(session, message):
                                         current_price = float(d[0].get("last", 0))
                                         price_change = float(d[0].get("change_percentage", 0))
                                         volume = float(d[0].get("volume_24h_quote", 0))
-                            klines = await fetch_gateio_klines(g_sym, interval=get_tf_gateio(), limit=200)
+                            klines = await fetch_gateio_klines(g_sym, interval=get_tf_gateio(), limit=get_lookback())
                             of_data = await fetch_gateio_fut_orderflow(g_sym)
                         elif ex == "mexc":
                             m_sym = sym if "_" in sym else f"{sym[:-4]}_USDT"
@@ -674,7 +659,7 @@ async def handle_message(session, message):
                                         current_price = float(d["data"].get("lastPrice", 0))
                                         price_change = float(d["data"].get("riseFallRate", 0)) * 100
                                         volume = float(d["data"].get("amount24", 0))
-                            klines = await fetch_mexc_klines(m_sym, interval=get_tf_mexc(), limit=200)
+                            klines = await fetch_mexc_klines(m_sym, interval=get_tf_mexc(), limit=get_lookback())
                             of_data = await fetch_mexc_fut_orderflow(m_sym)
                         elif ex == "cmc":
                             async with s.get(f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT") as r:
@@ -698,7 +683,7 @@ async def handle_message(session, message):
                         if of_data:
                             msg += f"{format_of_line(of_data, 0, 'N/A')}\n"
                             if klines:
-                                owfah_data = calculate_owfah(klines["deltas"], klines["volumes"], of_data.get('footprint', 0.0), klines, current_price, of_data)
+                                owfah_data = calculate_owfah(klines["deltas"], klines["volumes"], of_data.get('footprint', 0.0), klines, current_price, of_data, is_major=(sym.replace('USDT','').replace('_','') in BIG_COINS))
                                 msg += f"MaxD: {format_cvd(owfah_data['max_delta'])} │ MinD: {format_cvd(owfah_data['min_delta'])}\n"
                             msg += "\n"
                         kb.append([{"text": f"❌ Remove {sym} ({ex})", "callback_data": f"rwl:{sym}:{ex}"}])
@@ -731,10 +716,8 @@ async def handle_callback(session, callback):
         if not row:
             cursor.execute("INSERT INTO user_settings (chat_id, exchanges) VALUES (?, ?)", (str(chat_id), ",".join(enabled)))
             conn.commit()
-            
         if ex_name in enabled: enabled.remove(ex_name)
         else: enabled.append(ex_name)
-            
         cursor.execute("UPDATE user_settings SET exchanges=? WHERE chat_id=?", (",".join(enabled), str(chat_id)))
         conn.commit()
         await answer_callback(session, callback_id, f"Toggled {ex_name}")
@@ -756,7 +739,6 @@ async def handle_callback(session, callback):
             cursor.execute("DELETE FROM user_watchlists WHERE chat_id=? AND symbol=?", (str(chat_id), parts[1]))
             conn.commit()
             await answer_callback(session, callback_id, f"Removed {parts[1]} from watchlist")
-            
             cursor.execute("SELECT symbol, exchange FROM user_watchlists WHERE chat_id=? ORDER BY added_at DESC", (str(chat_id),))
             wl_list = cursor.fetchall()
             new_msg = "👀 <b>Your Watchlist</b>\n\n"
@@ -767,7 +749,6 @@ async def handle_callback(session, callback):
                     kb.append([{"text": f"❌ Remove {s} ({e})", "callback_data": f"rwl:{s}:{e}"}])
             else:
                 new_msg += "Your watchlist is empty."
-                
             payload = {"chat_id": chat_id, "message_id": message_id, "text": new_msg, "parse_mode": "HTML"}
             if kb: payload["reply_markup"] = {"inline_keyboard": kb}
             await session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText", json=payload)
@@ -803,11 +784,12 @@ async def poll_telegram():
                 await asyncio.sleep(5)
 
 # =========================
-# KLINE FETCHERS
+# KLINE FETCHERS — now default to get_lookback()
 # =========================
 
-async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
+async def fetch_gateio_klines(symbol, interval=None, limit=None):
     if interval is None: interval = get_tf_gateio()
+    if limit is None: limit = get_lookback()
     url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -826,8 +808,9 @@ async def fetch_gateio_klines(symbol, interval=None, limit=KLINE_LIMIT):
         except Exception:
             return None
 
-async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
+async def fetch_mexc_klines(symbol, interval=None, limit=None):
     if interval is None: interval = get_tf_mexc()
+    if limit is None: limit = get_lookback()
     url = f"https://futures.mexc.com/api/v1/contract/kline/{symbol}?interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -850,8 +833,9 @@ async def fetch_mexc_klines(symbol, interval=None, limit=KLINE_LIMIT):
         except Exception:
             return None
 
-async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT):
+async def fetch_binance_klines(symbol, interval=None, limit=None):
     if interval is None: interval = get_tf_binance()
+    if limit is None: limit = get_lookback()
     url = f"{BINANCE_FUTURES_KLINES}?symbol={symbol}&interval={interval}&limit={limit}"
     async with aiohttp.ClientSession() as session:
         try:
@@ -869,27 +853,10 @@ async def fetch_binance_klines(symbol, interval=None, limit=BINANCE_KLINE_LIMIT)
             return None
 
 # =========================
-# ADVANCED OWFAH / CONFLUENCE ENGINE  (NEW CORE)
+# ADVANCED OWFAH / CONFLUENCE ENGINE
 # =========================
 
 def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=None, is_major=False):
-    """
-    Full OWFAH confluence engine implementing the 5 families + mandatory conditions.
-    
-    Families:
-      1. Location   – Liquidity Walls + SVP/POC/VAH/VAL
-      2. Aggression  – Delta + Footprint
-      3. Absorption  – Wall hold + failed continuation / opposing delta absorbed
-      4. CVD Context – CVD expansion or divergence
-      5. Value Bias  – VWAP position/slope + POC migration
-    
-    Mandatory:
-      - ≥3 families
-      - Aggression present
-      - Absorption present
-      - D-Volume or scanner anomaly (caller already filters anomaly)
-      - Trigger proximity satisfied
-    """
     empty = {
         'score': 0, 'details': 'Insufficient Data', 'atr': 0,
         'max_delta': 0, 'min_delta': 0, 'delta_vol_pct': 0,
@@ -910,45 +877,38 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
     lows = klines["lows"]
     closes = klines["closes"]
     
-    # ---------- ATR ----------
     atr = calculate_atr(highs, lows, closes, ATR_PERIOD)
     if atr <= 0:
         return empty
     
-    # ---------- D-Volume (Relative ≥20-25%, P90, Z≥2) ----------
     prev_delta = deltas[-2]
     prev_vol = volumes[-2]
     avg_vol = sum(volumes[-20:]) / 20
     delta_vol_pct = (abs(prev_delta) / prev_vol * 100) if prev_vol > 0 else 0.0
-    d_vol_threshold = calculate_dynamic_d_vol(deltas, volumes, len(deltas)-1)
+    d_vol_threshold = calculate_dynamic_d_vol(deltas, volumes, len(deltas)-1, lookback=get_lookback())
     
-    # Z-score of current volume
     vol_mean = statistics.mean(volumes[-200:]) if len(volumes) >= 200 else statistics.mean(volumes)
     vol_std = statistics.stdev(volumes[-200:]) if len(volumes) >= 200 else (statistics.stdev(volumes) if len(volumes) > 1 else 1.0)
     vol_z = (volumes[-1] - vol_mean) / vol_std if vol_std > 0 else 0.0
     
     d_vol_passed = (delta_vol_pct >= max(20.0, d_vol_threshold * 0.8)) or (vol_z >= 2.0)
     
-    # ---------- Delta conditions ----------
     max_delta = max(deltas[-20:])
     min_delta = min(deltas[-20:])
     curr_delta = deltas[-1]
     
-    # Closing delta retention ≥90% of maximum delta
-    long_delta_ok = (curr_delta >= max_delta * 0.90) and (min_delta >= -0.10 * avg_vol)
-    short_delta_ok = (curr_delta <= min_delta * 0.90) and (max_delta <= 0.10 * avg_vol)
+    # SCALED: loosen max-delta rule on lower TFs
+    max_delta_factor = get_max_delta_factor()
+    long_delta_ok = (curr_delta >= max_delta * max_delta_factor) and (min_delta >= -0.10 * avg_vol)
+    short_delta_ok = (curr_delta <= min_delta * max_delta_factor) and (max_delta <= 0.10 * avg_vol)
     
-    # ---------- Footprint ----------
-    # Normalized imbalance ≥0.20; major 3:1 (~0.5), alt 4:1 (~0.6)
     fp_threshold = 0.50 if is_major else 0.20
     fp_long = footprint >= fp_threshold
     fp_short = footprint <= -fp_threshold
     
-    # Aggression = Delta + Footprint
     aggression_long = d_vol_passed and long_delta_ok and fp_long
     aggression_short = d_vol_passed and short_delta_ok and fp_short
     
-    # ---------- Location: Walls + SVP/POC/VAH/VAL ----------
     bid_wall = ask_wall = False
     mb_price = ma_price = 0.0
     if of_data:
@@ -957,7 +917,9 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
         bid_wall, ask_wall, _, mb_price, _, ma_price = detect_liquidity_wall(bids, asks)
     
     poc, vah, val = calculate_poc_va(highs, lows, closes, volumes)
-    svp_dist = SVP_ATR_MULT * atr   # 0.25 × ATR(14)
+    
+    # SCALED: wider ATR multiplier on lower TFs
+    svp_dist = get_atr_mult() * atr
     
     location_long = False
     location_short = False
@@ -968,9 +930,7 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
         levels = [poc]
         if vah is not None: levels.append(vah)
         if val is not None: levels.append(val)
-        
         near_level = any(abs(current_price - lvl) <= svp_dist for lvl in levels)
-        
         if bid_wall and mb_price and abs(mb_price - poc) <= svp_dist:
             wall_long = True
             location_long = True
@@ -978,42 +938,26 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
             wall_short = True
             location_short = True
         if near_level:
-            # Price itself is at a volume-profile level
-            if aggression_long or long_delta_ok:
-                location_long = True
-            if aggression_short or short_delta_ok:
-                location_short = True
+            if aggression_long or long_delta_ok: location_long = True
+            if aggression_short or short_delta_ok: location_short = True
     
-    # ---------- Absorption ----------
-    # Simple but effective: aggressive flow into a wall that is still holding
-    # (price has not broken through the wall by the invalidation buffer)
     absorption_long = False
     absorption_short = False
-    
     if wall_long and mb_price > 0:
-        # Price still above the bid wall (not broken down)
-        if current_price >= mb_price * 0.9985:  # within invalidation buffer
-            absorption_long = True
+        if current_price >= mb_price * 0.9985: absorption_long = True
     if wall_short and ma_price > 0:
-        if current_price <= ma_price * 1.0015:
-            absorption_short = True
-    
-    # Also treat strong opposing delta that failed to continue as absorption
+        if current_price <= ma_price * 1.0015: absorption_short = True
     if long_delta_ok and curr_delta > 0 and closes[-1] <= closes[-2]:
-        absorption_long = True   # buying absorbed, price didn't rise
+        absorption_long = True
     if short_delta_ok and curr_delta < 0 and closes[-1] >= closes[-2]:
-        absorption_short = True  # selling absorbed, price didn't fall
+        absorption_short = True
     
-    # ---------- CVD Context ----------
     cvd_ok, cvd_norm = calculate_cvd_divergence(closes, deltas)
     
-    # ---------- Value Bias: VWAP + POC migration ----------
     vwap, std_dev, slope, typical_prices = calculate_vwap_bands(highs, lows, closes, volumes)
-    
     vwap_long = False
     vwap_short = False
     if vwap is not None and std_dev > 0:
-        # No-chase boundary ±1.5σ, slope lookback already applied
         if slope > 0 and (vwap - 1.0 * std_dev <= current_price <= vwap + 0.5 * std_dev):
             vwap_long = True
         if slope < 0 and (vwap - 0.5 * std_dev <= current_price <= vwap + 1.0 * std_dev):
@@ -1022,19 +966,19 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
     poc_long = False
     poc_short = False
     if poc is not None and len(typical_prices) >= 5:
-        poc_dist = 0.25 * atr
+        # SCALED: wider POC proximity
+        poc_dist = get_atr_mult() * atr
         migrating_up = typical_prices[-1] > typical_prices[-5]
         migrating_down = typical_prices[-1] < typical_prices[-5]
         near_poc = abs(current_price - poc) <= poc_dist
-        if migrating_up and near_poc:
-            poc_long = True
-        if migrating_down and near_poc:
-            poc_short = True
+        if migrating_up and near_poc: poc_long = True
+        if migrating_down and near_poc: poc_short = True
     
     value_long = vwap_long or poc_long
     value_short = vwap_short or poc_short
     
-    # ---------- Trigger Proximity (0.25–0.50 × ATR) ----------
+    # SCALED: proximity window widens on lower TFs
+    prox_mult = get_prox_mult()
     proximity_ok = False
     key_levels = []
     if poc: key_levels.append(poc)
@@ -1043,27 +987,14 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
     if vwap: key_levels.append(vwap)
     if mb_price: key_levels.append(mb_price)
     if ma_price: key_levels.append(ma_price)
-    
     for lvl in key_levels:
-        dist = abs(current_price - lvl)
-        if 0.25 * atr <= dist <= 0.50 * atr or dist <= 0.25 * atr:
+        if abs(current_price - lvl) <= prox_mult * atr:
             proximity_ok = True
             break
-    # Also accept if we are already sitting on a wall / POC
-    if wall_long or wall_short or (poc and abs(current_price - poc) <= 0.25 * atr):
-        proximity_ok = True
     
-    # ---------- Score the 5 families ----------
-    families = {
-        'Location':   False,
-        'Aggression': False,
-        'Absorption': False,
-        'CVD':        False,
-        'Value':      False
-    }
+    families = {'Location': False, 'Aggression': False, 'Absorption': False, 'CVD': False, 'Value': False}
     details = []
     
-    # Direction decision first
     direction = None
     if aggression_long and (absorption_long or location_long):
         direction = 'LONG'
@@ -1084,12 +1015,9 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
         families['Value']      = value_short
     
     score = sum(1 for v in families.values() if v)
-    
     for name, active in families.items():
-        if active:
-            details.append(name)
+        if active: details.append(name)
     
-    # ---------- Mandatory conditions ----------
     signal = 'NO TRADE'
     if (score >= CONFLUENCE_THRESHOLD and
         families['Aggression'] and
@@ -1100,28 +1028,16 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
         signal = direction
     
     return {
-        'score': score,
-        'details': ", ".join(details) if details else "None",
-        'atr': atr,
-        'max_delta': max_delta,
-        'min_delta': min_delta,
-        'delta_vol_pct': delta_vol_pct,
-        'vwap_val': vwap,
-        'poc_val': poc,
+        'score': score, 'details': ", ".join(details) if details else "None",
+        'atr': atr, 'max_delta': max_delta, 'min_delta': min_delta,
+        'delta_vol_pct': delta_vol_pct, 'vwap_val': vwap, 'poc_val': poc,
         'signal': signal,
-        'delta_footprint_long': aggression_long,
-        'delta_footprint_short': aggression_short,
-        'vwap_long': vwap_long,
-        'vwap_short': vwap_short,
-        'poc_long': poc_long,
-        'poc_short': poc_short,
-        'cvd_div': cvd_ok,
-        'wall_long': wall_long,
-        'wall_short': wall_short,
-        'absorption_long': absorption_long,
-        'absorption_short': absorption_short,
-        'd_vol_passed': d_vol_passed,
-        'proximity_ok': proximity_ok,
+        'delta_footprint_long': aggression_long, 'delta_footprint_short': aggression_short,
+        'vwap_long': vwap_long, 'vwap_short': vwap_short,
+        'poc_long': poc_long, 'poc_short': poc_short,
+        'cvd_div': cvd_ok, 'wall_long': wall_long, 'wall_short': wall_short,
+        'absorption_long': absorption_long, 'absorption_short': absorption_short,
+        'd_vol_passed': d_vol_passed, 'proximity_ok': proximity_ok,
         'families': families
     }
 
@@ -1130,7 +1046,7 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
 # =========================
 
 async def scan_gateio_futures(first_run=False):
-    print("Scanning Gate.io Futures...")
+    print(f"Scanning Gate.io Futures... (TF={CURRENT_TIMEFRAME}, lookback={get_lookback()})")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(GATEIO_FUTURES_TICKERS) as resp:
@@ -1144,29 +1060,22 @@ async def scan_gateio_futures(first_run=False):
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            
-            # Step 1: Scanner anomaly (D-Volume / price displacement proxy)
             trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
             
-            klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio(), limit=200)
+            klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio(), limit=get_lookback())
             if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_gateio_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
-            
             is_major = base in BIG_COINS
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price, of, is_major=is_major)
             
-            if res['signal'] == 'NO TRADE':
-                continue
+            if res['signal'] == 'NO TRADE': continue
             
-            signal = res['signal']
-            score = res['score']
-            details = res['details']
             vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
             poc_str = f"{res['poc_val']:.4f}" if res['poc_val'] else "N/A"
-            of_line = format_of_line(of, score, details)
+            of_line = format_of_line(of, res['score'], res['details'])
             
             message = (
                 f"🚨 GATE.IO FUTURES OWFAH/2 ALERT\n\n"
@@ -1174,7 +1083,7 @@ async def scan_gateio_futures(first_run=False):
                 f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                 f"Price Change: {price_change:+.2f}%\n"
                 f"Volume: ${volume:,.0f}\n"
-                f"Entry Signal: {signal}\n"
+                f"Entry Signal: {res['signal']}\n"
                 f"VWAP: {vwap_str}\n"
                 f"POC (Vol Profile): {poc_str}\n"
                 f"{of_line}\n\n"
@@ -1186,7 +1095,7 @@ async def scan_gateio_futures(first_run=False):
         traceback.print_exc()
 
 async def scan_mexc_futures(first_run=False):
-    print("Scanning MEXC Futures...")
+    print(f"Scanning MEXC Futures... (TF={CURRENT_TIMEFRAME}, lookback={get_lookback()})")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(MEXC_FUTURES_TICKERS) as resp:
@@ -1201,28 +1110,22 @@ async def scan_mexc_futures(first_run=False):
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("riseFallRate", 0)) * 100
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            
             trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
                 
-            klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc(), limit=200)
+            klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc(), limit=get_lookback())
             if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_mexc_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
-            
             is_major = base in BIG_COINS
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price, of, is_major=is_major)
             
-            if res['signal'] == 'NO TRADE':
-                continue
+            if res['signal'] == 'NO TRADE': continue
             
-            signal = res['signal']
-            score = res['score']
-            details = res['details']
             vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
             poc_str = f"{res['poc_val']:.4f}" if res['poc_val'] else "N/A"
-            of_line = format_of_line(of, score, details)
+            of_line = format_of_line(of, res['score'], res['details'])
             
             message = (
                 f"🚨 MEXC FUTURES OWFAH/2 ALERT\n\n"
@@ -1230,7 +1133,7 @@ async def scan_mexc_futures(first_run=False):
                 f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                 f"Price Change: {price_change:+.2f}%\n"
                 f"Volume: ${volume:,.0f}\n"
-                f"Entry Signal: {signal}\n"
+                f"Entry Signal: {res['signal']}\n"
                 f"VWAP: {vwap_str}\n"
                 f"POC (Vol Profile): {poc_str}\n"
                 f"{of_line}\n\n"
@@ -1242,7 +1145,7 @@ async def scan_mexc_futures(first_run=False):
         traceback.print_exc()
 
 async def scan_binance_futures(first_run=False):
-    print("Scanning Binance Futures...")
+    print(f"Scanning Binance Futures... (TF={CURRENT_TIMEFRAME}, lookback={get_lookback()})")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(BINANCE_FUTURES_TICKERS) as resp:
@@ -1256,27 +1159,21 @@ async def scan_binance_futures(first_run=False):
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            
-            # Step 1: Scanner anomaly
             trigger = meets_threshold and abs(price_change) >= BINANCE_PRICE_CHANGE_THRESHOLD
             if not trigger: continue
                 
-            klines = await fetch_binance_klines(symbol, interval=get_tf_binance(), limit=200)
+            klines = await fetch_binance_klines(symbol, interval=get_tf_binance(), limit=get_lookback())
             if not klines or len(klines["closes"]) < 20: continue
                 
             of = await fetch_binance_fut_orderflow(symbol)
             footprint = of.get('footprint', 0.0)
-            
             is_major = base in BIG_COINS
             res = calculate_owfah(klines["deltas"], klines["volumes"], footprint, klines, current_price, of, is_major=is_major)
             
             if res['signal'] != 'NO TRADE':
-                signal = res['signal']
-                score = res['score']
-                details = res['details']
                 vwap_str = f"{res['vwap_val']:.4f}" if res['vwap_val'] else "N/A"
                 poc_str = f"{res['poc_val']:.4f}" if res['poc_val'] else "N/A"
-                of_line = format_of_line(of, score, details)
+                of_line = format_of_line(of, res['score'], res['details'])
                 
                 message = (
                     f"🚨 BINANCE FUTURES OWFAH/2 ALERT\n\n"
@@ -1284,7 +1181,7 @@ async def scan_binance_futures(first_run=False):
                     f"⏱ Timeframe: {CURRENT_TIMEFRAME}\n"
                     f"Price Change: {price_change:+.2f}%\n"
                     f"Volume: ${volume:,.0f}\n"
-                    f"Entry Signal: {signal}\n"
+                    f"Entry Signal: {res['signal']}\n"
                     f"VWAP: {vwap_str}\n"
                     f"POC (Vol Profile): {poc_str}\n"
                     f"{of_line}\n\n"
@@ -1292,11 +1189,10 @@ async def scan_binance_futures(first_run=False):
                 )
                 await send_telegram(message, "binance", symbol, tradingview_url("binance_fut", symbol))
                 
-            # BTC Watchlist Logic (Invalidation & Absorption) – kept intact
             if symbol == "BTCUSDT":
                 atr = res['atr']
                 poc = res['poc_val']
-                svp_dist = 0.25 * atr
+                svp_dist = get_atr_mult() * atr
                 mb_price = of.get('max_bid_price', 0.0)
                 ma_price = of.get('max_ask_price', 0.0)
                 mb_vol = of.get('max_bid_vol', 0.0)
@@ -1312,7 +1208,7 @@ async def scan_binance_futures(first_run=False):
                 bid_wall_price = BTC_WATCHLIST["highest_bid_wall"]["price"]
                 ask_wall_price = BTC_WATCHLIST["highest_ask_wall"]["price"]
                 
-                if bid_wall_price > 0 and (current_price > bid_wall_price * 1.0015 or abs(current_price - bid_wall_price) < atr * 0.25):
+                if bid_wall_price > 0 and (current_price > bid_wall_price * INVALIDATION_BUY or abs(current_price - bid_wall_price) < atr * get_atr_mult()):
                     if res['delta_footprint_long']:
                         of_line = format_of_line(of, 3, "Wall, Delta/FP, Aggression")
                         message = (
@@ -1326,7 +1222,7 @@ async def scan_binance_futures(first_run=False):
                         await send_telegram(message, "binance", "BTCUSDT", tradingview_url("binance_fut", "BTCUSDT"))
                         BTC_WATCHLIST["highest_bid_wall"] = {"price": 0.0, "vol": 0.0}
                         
-                if ask_wall_price > 0 and (current_price < ask_wall_price * 0.9985 or abs(current_price - ask_wall_price) < atr * 0.25):
+                if ask_wall_price > 0 and (current_price < ask_wall_price * INVALIDATION_SELL or abs(current_price - ask_wall_price) < atr * get_atr_mult()):
                     if res['delta_footprint_short']:
                         of_line = format_of_line(of, 3, "Wall, Delta/FP, Aggression")
                         message = (
@@ -1349,7 +1245,7 @@ async def scan_binance_futures(first_run=False):
 # =========================
 
 async def main():
-    print("Starting Owfah/2...")
+    print(f"Starting Owfah/2... TF={CURRENT_TIMEFRAME}, lookback={get_lookback()}")
     await send_telegram(f"Sniping 🍁\nBot: Owfah/2\n⏱ Timeframe: {CURRENT_TIMEFRAME}\n\nSend /timeframe to change.\nSend /settings to choose exchanges.\nSend /watchlist to view active alerts.")
     asyncio.create_task(binance_ws_manager())
     asyncio.create_task(poll_telegram())
