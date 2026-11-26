@@ -98,6 +98,14 @@ def get_atr_mult(): return ATR_MULT_MAP[CURRENT_TIMEFRAME]
 def get_prox_mult(): return PROX_MULT_MAP[CURRENT_TIMEFRAME]
 def get_max_delta_factor():
     return 0.90 if CURRENT_TIMEFRAME in ("1hr", "4h", "1d", "1w", "1M") else 0.75
+def is_lower_tf():
+    return CURRENT_TIMEFRAME in ("5m", "15m", "30m")
+def get_opp_delta_cap():
+    return 0.35 if is_lower_tf() else 0.10
+def get_futures_price_threshold():
+    return 2.5 if is_lower_tf() else FUTURES_PRICE_CHANGE_THRESHOLD
+def get_binance_price_threshold():
+    return 0.8 if is_lower_tf() else BINANCE_PRICE_CHANGE_THRESHOLD
 
 # =========================
 # WALL TRACKER & WATCHLIST STATE
@@ -897,10 +905,11 @@ def calculate_owfah(deltas, volumes, footprint, klines, current_price, of_data=N
     min_delta = min(deltas[-20:])
     curr_delta = deltas[-1]
     
-    # SCALED: loosen max-delta rule on lower TFs
+    # SCALED: loosen max-delta rule and opposite-side cap on lower TFs
     max_delta_factor = get_max_delta_factor()
-    long_delta_ok = (curr_delta >= max_delta * max_delta_factor) and (min_delta >= -0.10 * avg_vol)
-    short_delta_ok = (curr_delta <= min_delta * max_delta_factor) and (max_delta <= 0.10 * avg_vol)
+    opp_cap = get_opp_delta_cap()
+    long_delta_ok = (curr_delta >= max_delta * max_delta_factor) and (min_delta >= -opp_cap * avg_vol)
+    short_delta_ok = (curr_delta <= min_delta * max_delta_factor) and (max_delta <= opp_cap * avg_vol)
     
     fp_threshold = 0.50 if is_major else 0.20
     fp_long = footprint >= fp_threshold
@@ -1052,6 +1061,7 @@ async def scan_gateio_futures(first_run=False):
             async with session.get(GATEIO_FUTURES_TICKERS) as resp:
                 if resp.status != 200: return
                 ticker_data = await resp.json()
+        price_thresh = get_futures_price_threshold()
         for item in ticker_data:
             symbol = item["contract"]
             if not symbol.endswith("_USDT"): continue
@@ -1060,7 +1070,7 @@ async def scan_gateio_futures(first_run=False):
             current_price = float(item.get("last", 0))
             price_change = float(item.get("change_percentage", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
+            trigger = meets_threshold and abs(price_change) >= price_thresh
             if not trigger: continue
             
             klines = await fetch_gateio_klines(symbol, interval=get_tf_gateio(), limit=get_lookback())
@@ -1102,6 +1112,7 @@ async def scan_mexc_futures(first_run=False):
                 if resp.status != 200: return
                 data = await resp.json()
         tickers = data.get("data", [])
+        price_thresh = get_futures_price_threshold()
         for item in tickers:
             symbol = item.get("symbol")
             if not symbol.endswith("USDT"): continue
@@ -1110,7 +1121,7 @@ async def scan_mexc_futures(first_run=False):
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("riseFallRate", 0)) * 100
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            trigger = meets_threshold and abs(price_change) >= FUTURES_PRICE_CHANGE_THRESHOLD
+            trigger = meets_threshold and abs(price_change) >= price_thresh
             if not trigger: continue
                 
             klines = await fetch_mexc_klines(symbol, interval=get_tf_mexc(), limit=get_lookback())
@@ -1151,6 +1162,7 @@ async def scan_binance_futures(first_run=False):
             async with session.get(BINANCE_FUTURES_TICKERS) as resp:
                 if resp.status != 200: return
                 tickers = await resp.json()
+        price_thresh = get_binance_price_threshold()
         for item in tickers:
             symbol = item["symbol"]
             if not symbol.endswith("USDT"): continue
@@ -1159,7 +1171,7 @@ async def scan_binance_futures(first_run=False):
             current_price = float(item.get("lastPrice", 0))
             price_change = float(item.get("priceChangePercent", 0))
             meets_threshold = volume >= FUTURES_MIN_VOLUME
-            trigger = meets_threshold and abs(price_change) >= BINANCE_PRICE_CHANGE_THRESHOLD
+            trigger = meets_threshold and abs(price_change) >= price_thresh
             if not trigger: continue
                 
             klines = await fetch_binance_klines(symbol, interval=get_tf_binance(), limit=get_lookback())
@@ -1265,3 +1277,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
